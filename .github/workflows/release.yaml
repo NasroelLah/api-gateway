@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: 7
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+
+          BINARY_NAME="api-gateway-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goarm }}" != "" ]; then
+            BINARY_NAME="${BINARY_NAME}v${{ matrix.goarm }}"
+          fi
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/${BINARY_NAME} \
+            ./cmd/gateway
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+          path: dist/
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Generate changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since ${PREV_TAG}" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
+          else
+            echo "## Initial Release" > CHANGELOG.md
+          fi
+
+          echo "" >> CHANGELOG.md
+          echo "## Binaries" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "Supported platforms:" >> CHANGELOG.md
+          echo "- linux/amd64" >> CHANGELOG.md
+          echo "- linux/arm64" >> CHANGELOG.md
+          echo "- linux/arm/v7" >> CHANGELOG.md
+          echo "- darwin/amd64" >> CHANGELOG.md
+          echo "- darwin/arm64" >> CHANGELOG.md
+          echo "- windows/amd64" >> CHANGELOG.md
+          echo "- windows/arm64" >> CHANGELOG.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
