@@ -44,18 +44,31 @@ go run ./cmd/gateway
 # Option 2: Run with external config file
 go run ./cmd/gateway -config config.yaml
 
-# Option 3: Build and run with embedded config
+# Option 3: Quick start with CLI flags
+go run ./cmd/gateway -port 8080 -api-key my-secret-key
+
+# Option 4: Build and run with embedded config
 go build -o gateway ./cmd/gateway
 ./gateway
 
-# Option 4: Build and run with external config
-./gateway -config config.yaml
+# Option 5: Build and run with CLI flags
+./gateway -port 8080 -host 0.0.0.0 -api-key my-secret-key -log-level debug
 
-# Option 5: Override with environment variables
+# Option 6: Override with environment variables
 export SERVER_PORT=8080
 export LOGGING_LEVEL=debug
 ./gateway
 ```
+
+### Command Line Flags
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `-config` | Path to YAML config file | `-config config.yaml` |
+| `-port` | Server port (overrides config) | `-port 8080` |
+| `-host` | Server bind address | `-host 0.0.0.0` |
+| `-api-key` | API key (enables auth if set) | `-api-key my-secret` |
+| `-log-level` | Log level: debug, info, warn, error | `-log-level debug` |
 
 The gateway will start on `http://0.0.0.0:7070` by default.
 
@@ -322,12 +335,15 @@ docker build -t api-gateway:latest .
 # Option 1: Run with embedded config (simplest)
 docker run -p 7070:7070 api-gateway:latest
 
-# Option 2: Run with external config file
+# Option 2: Run with CLI flags
+docker run -p 8080:8080 api-gateway:latest -port 8080 -api-key my-secret-key
+
+# Option 3: Run with external config file
 docker run -p 7070:7070 \
   -v ${PWD}/config.yaml:/app/config.yaml \
   api-gateway:latest -config /app/config.yaml
 
-# Option 3: Run with environment variables
+# Option 4: Run with environment variables
 docker run -p 7070:7070 \
   -e SERVER_PORT=7070 \
   -e LOGGING_LEVEL=debug \

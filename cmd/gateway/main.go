@@ -30,15 +30,22 @@ var embeddedConfig []byte
 func main() {
 	// Parse command line flags
 	configPath := flag.String("config", "", "Path to configuration file (YAML). If not provided, uses embedded config.")
+	port := flag.Int("port", 0, "Server port (overrides config)")
+	host := flag.String("host", "", "Server host/bind address (overrides config)")
+	apiKey := flag.String("api-key", "", "API key for authentication (enables auth if set)")
+	logLevel := flag.String("log-level", "", "Log level: debug, info, warn, error (overrides config)")
 	flag.Parse()
 
 	// Load configuration with embedded fallback
-	// Priority: ENV variables > External config file > Embedded config
+	// Priority: CLI flags > ENV variables > External config file > Embedded config
 	cfg, err := config.LoadConfigWithEmbedded(*configPath, embeddedConfig)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Apply CLI flag overrides (highest priority)
+	applyFlagOverrides(cfg, *port, *host, *apiKey, *logLevel)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -76,6 +83,30 @@ func main() {
 	if err := run(cfg, logger); err != nil {
 		logger.Error("gateway error", zap.Error(err))
 		os.Exit(1)
+	}
+}
+
+// applyFlagOverrides applies CLI flag values to config (highest priority)
+func applyFlagOverrides(cfg *config.Config, port int, host, apiKey, logLevel string) {
+	// Override port if specified
+	if port > 0 {
+		cfg.Server.Port = port
+	}
+
+	// Override host if specified
+	if host != "" {
+		cfg.Server.Host = host
+	}
+
+	// Override API key if specified (also enables auth)
+	if apiKey != "" {
+		cfg.Auth.Enabled = true
+		cfg.Auth.APIKey = apiKey
+	}
+
+	// Override log level if specified
+	if logLevel != "" {
+		cfg.Logging.Level = logLevel
 	}
 }
 
