@@ -304,7 +304,8 @@ go test -v ./internal/... -run Property
 
 ```bash
 # Build binary
-go build -o gateway ./cmd/gateway
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+go build -trimpath -ldflags="-s -w" -o bin/api-gateway ./cmd/gateway
 
 # Build Docker image
 docker build -t api-gateway:latest .
