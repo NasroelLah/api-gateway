@@ -30,12 +30,12 @@ func NewTracerProvider(cfg *config.TracingConfig) (*TracerProvider, error) {
 	}
 
 	// Create resource with service name
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+	res, err := resource.New(
+		context.Background(),
+		resource.WithAttributes(
 			semconv.ServiceName(cfg.ServiceName),
 		),
+		resource.WithSchemaURL(semconv.SchemaURL),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)

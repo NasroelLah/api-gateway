@@ -112,7 +112,7 @@ rate_limit:
 # =============================================================================
 logging:
   # Log level: debug, info, warn, error
-  level: "info"
+  level: "debug"
   
   # Log format: json or console
   format: "json"
@@ -172,3 +172,11 @@ tls:
     
     # Path to CA certificate for client verification
     ca_file: "/etc/tls/ca.crt"
+
+# =============================================================================
+# Authentication
+# =============================================================================
+auth:
+  enabled: true
+  api_key: ""  # kosongkan untuk auto-generate
+  header_name: "X-API-Key"
