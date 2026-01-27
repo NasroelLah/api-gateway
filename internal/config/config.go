@@ -113,14 +113,43 @@ type MTLSConfig struct {
 
 // LoadConfig memuat konfigurasi dari ENV atau YAML
 // ENV variables take precedence over YAML file values
-// Priority: ENV > External Config File > Embedded Config
+// Priority: ENV > External Config File > Built-in Defaults
 func LoadConfig(configPath string) (*Config, error) {
-	return LoadConfigWithEmbedded(configPath, nil)
+	v := viper.New()
+
+	// Set defaults (lowest priority)
+	setDefaults(v)
+
+	// Load from external YAML file if path provided (overrides defaults)
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+		if err := v.ReadInConfig(); err != nil {
+			// Only return error if file was explicitly specified but not found/readable
+			var configFileNotFoundError viper.ConfigFileNotFoundError
+			if !errors.As(err, &configFileNotFoundError) {
+				return nil, fmt.Errorf("failed to read config file: %w", err)
+			}
+			// If file not found but was specified, return error
+			return nil, fmt.Errorf("config file not found: %s", configPath)
+		}
+	}
+
+	// Enable automatic environment variable binding (highest priority)
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	return &cfg, nil
 }
 
 // LoadConfigWithEmbedded loads config with optional embedded default config
 // embeddedConfig should be the content of a YAML file (can be nil)
-// Priority: ENV > External Config File > Embedded Config
+// Priority: ENV > External Config File > Embedded Config > Built-in Defaults
+// This function is kept for backward compatibility
 func LoadConfigWithEmbedded(configPath string, embeddedConfig []byte) (*Config, error) {
 	v := viper.New()
 
@@ -180,12 +209,22 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy.max_idle_conns", 1000)
 	v.SetDefault("proxy.max_idle_conns_per_host", 100)
 	v.SetDefault("proxy.timeout", 60*time.Second)
-	v.SetDefault("proxy.dynamic_upstream.enabled", false)
+	v.SetDefault("proxy.dynamic_upstream.enabled", true)
 	v.SetDefault("proxy.dynamic_upstream.header_name", "X-Upstream-Target")
+	v.SetDefault("proxy.dynamic_upstream.allowed_hosts", []string{"*"})
+	// Set empty upstreams by default - dynamic upstream will handle routing
+	v.SetDefault("proxy.upstreams", []map[string]string{})
 
 	// Whitelist defaults
-	v.SetDefault("whitelist.enabled", true)
+	v.SetDefault("whitelist.enabled", false) // Disabled by default for easier development
 	v.SetDefault("whitelist.reload_interval", 60*time.Second)
+	v.SetDefault("whitelist.entries", []string{
+		"127.0.0.1/32",   // localhost IPv4
+		"::1/128",        // localhost IPv6
+		"10.0.0.0/8",     // private network
+		"172.16.0.0/12",  // private network
+		"192.168.0.0/16", // private network
+	})
 
 	// Rate limit defaults
 	v.SetDefault("rate_limit.enabled", true)
@@ -207,6 +246,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tracing.enabled", false)
 	v.SetDefault("tracing.service_name", "api-gateway")
 	v.SetDefault("tracing.exporter", "otlp")
+	v.SetDefault("tracing.endpoint", "localhost:4317") // default OTLP endpoint
 	v.SetDefault("tracing.sample_rate", 1.0)
 
 	// TLS defaults
@@ -382,12 +422,7 @@ func (c *Config) Validate() error {
 				Message: "required when tracing is enabled",
 			})
 		}
-		if c.Tracing.Endpoint == "" {
-			errs = append(errs, ValidationError{
-				Field:   "tracing.endpoint",
-				Message: "required when tracing is enabled",
-			})
-		}
+		// Endpoint is optional - some exporters might not need it
 		validExporters := map[string]bool{"otlp": true, "jaeger": true, "zipkin": true}
 		if !validExporters[c.Tracing.Exporter] {
 			errs = append(errs, ValidationError{

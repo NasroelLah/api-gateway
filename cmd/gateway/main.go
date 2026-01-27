@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -21,24 +20,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// Embed default config.yaml at compile time
-// This will be used as fallback if no external config is provided
-//
-//go:embed config.yaml
-var embeddedConfig []byte
-
 func main() {
 	// Parse command line flags
-	configPath := flag.String("config", "", "Path to configuration file (YAML). If not provided, uses embedded config.")
+	configPath := flag.String("config", "", "Path to configuration file (YAML). If not provided, uses built-in defaults.")
 	port := flag.Int("port", 0, "Server port (overrides config)")
 	host := flag.String("host", "", "Server host/bind address (overrides config)")
 	apiKey := flag.String("api-key", "", "API key for authentication (enables auth if set)")
 	logLevel := flag.String("log-level", "", "Log level: debug, info, warn, error (overrides config)")
 	flag.Parse()
 
-	// Load configuration with embedded fallback
-	// Priority: CLI flags > ENV variables > External config file > Embedded config
-	cfg, err := config.LoadConfigWithEmbedded(*configPath, embeddedConfig)
+	// Load configuration with defaults
+	// Priority: CLI flags > ENV variables > External config file > Built-in defaults
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -73,7 +66,7 @@ func main() {
 			zap.Int("port", cfg.Server.Port),
 		)
 	} else {
-		logger.Info("starting API Gateway with embedded config",
+		logger.Info("starting API Gateway with built-in defaults",
 			zap.String("host", cfg.Server.Host),
 			zap.Int("port", cfg.Server.Port),
 		)
