@@ -63,7 +63,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(method, path, nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -97,7 +97,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 
 			// Create request with trace context headers
 			req := httptest.NewRequest(method, path, nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			// Inject parent trace context into request headers
 			propagator := otel.GetTextMapPropagator()
@@ -138,7 +138,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(method, "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -165,7 +165,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", path, nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -221,7 +221,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 
 			for i := 0; i < numRequests; i++ {
 				req := httptest.NewRequest("GET", "/test", nil)
-				req.RemoteAddr = "192.168.1.1:8080"
+				req.RemoteAddr = "192.168.1.1:7070"
 
 				rr := httptest.NewRecorder()
 				handler.ServeHTTP(rr, req)
@@ -252,7 +252,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(method, "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -282,7 +282,7 @@ func TestProperty13_TraceContextPropagation(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)

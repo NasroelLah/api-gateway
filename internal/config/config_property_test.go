@@ -279,7 +279,7 @@ func validConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Host:         "0.0.0.0",
-			Port:         8080,
+			Port:         7070,
 			ReadTimeout:  30000000000,  // 30s
 			WriteTimeout: 30000000000,  // 30s
 			IdleTimeout:  120000000000, // 120s

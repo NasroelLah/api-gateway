@@ -132,7 +132,7 @@ func TestProperty9_LogFieldsCompleteness(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 			ctx := SetRequestID(req.Context(), requestID)
 			req = req.WithContext(ctx)
 
@@ -160,7 +160,7 @@ func TestProperty9_LogFieldsCompleteness(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(method, "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -189,7 +189,7 @@ func TestProperty9_LogFieldsCompleteness(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", path, nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -215,7 +215,7 @@ func TestProperty9_LogFieldsCompleteness(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -348,7 +348,7 @@ func TestProperty10_JSONLogFormatValidity(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(method, "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 			ctx := SetRequestID(req.Context(), "test-request-id")
 			req = req.WithContext(ctx)
 
@@ -384,7 +384,7 @@ func TestProperty10_JSONLogFormatValidity(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 			ctx := SetRequestID(req.Context(), "test-request-id")
 			req = req.WithContext(ctx)
 
@@ -427,7 +427,7 @@ func TestProperty10_JSONLogFormatValidity(t *testing.T) {
 			// Make multiple requests
 			for i := 0; i < numRequests; i++ {
 				req := httptest.NewRequest("GET", "/test", nil)
-				req.RemoteAddr = "192.168.1.1:8080"
+				req.RemoteAddr = "192.168.1.1:7070"
 				ctx := SetRequestID(req.Context(), "req-"+itoa(i))
 				req = req.WithContext(ctx)
 
@@ -465,7 +465,7 @@ func TestProperty10_JSONLogFormatValidity(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.RemoteAddr = "192.168.1.1:8080"
+			req.RemoteAddr = "192.168.1.1:7070"
 
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)

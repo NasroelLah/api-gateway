@@ -503,7 +503,7 @@ func TestDomainWhitelist(t *testing.T) {
 		{
 			name:     "hostname with port is normalized",
 			entries:  []string{"*.example.com"},
-			hostname: "api.example.com:8080",
+			hostname: "api.example.com:7070",
 			want:     true,
 		},
 		{
