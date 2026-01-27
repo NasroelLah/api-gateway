@@ -43,10 +43,12 @@ proxy:
     header_name: "X-Upstream-Target"
     
     # Allowed hosts for dynamic routing (supports wildcards)
+    # Use "*" to allow all hosts (not recommended for production)
     allowed_hosts:
-      - "*.internal.example.com"
-      - "api.trusted-partner.com"
-      - "*.svc.cluster.local"
+      - "*"
+      # - "*.internal.example.com"
+      # - "api.trusted-partner.com"
+      # - "*.svc.cluster.local"
   
   # Static upstream routing rules (longest prefix match)
   upstreams:

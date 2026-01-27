@@ -119,7 +119,7 @@ tracing:
 Override any config value using environment variables:
 
 ```bash
-export GATEWAY_SERVER_PORT=8080
+export GATEWAY_SERVER_PORT=7070
 export GATEWAY_LOGGING_LEVEL=debug
 export GATEWAY_WHITELIST_ENABLED=false
 export GATEWAY_RATE_LIMIT_REQUESTS_PER_SECOND=200

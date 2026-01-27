@@ -262,6 +262,11 @@ func (pm *ProxyManager) isHostAllowed(host string) bool {
 	}
 
 	for _, pattern := range pm.allowedHosts {
+		// Allow all hosts with "*" pattern
+		if pattern == "*" {
+			return true
+		}
+
 		// Extract pattern hostname without port
 		patternHost := pattern
 		if h, _, err := net.SplitHostPort(pattern); err == nil {
