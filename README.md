@@ -38,19 +38,83 @@ cp config.example.yaml config.yaml
 ### Running the Gateway
 
 ```bash
-# Run with config file
-go run ./cmd/gateway/main.go -config config.yaml
+# Option 1: Run with embedded config (no config file needed)
+go run ./cmd/gateway
 
-# Or build and run
+# Option 2: Run with external config file
+go run ./cmd/gateway -config config.yaml
+
+# Option 3: Build and run with embedded config
 go build -o gateway ./cmd/gateway
+./gateway
+
+# Option 4: Build and run with external config
 ./gateway -config config.yaml
+
+# Option 5: Override with environment variables
+export SERVER_PORT=8080
+export LOGGING_LEVEL=debug
+./gateway
 ```
 
 The gateway will start on `http://0.0.0.0:7070` by default.
 
 ## Configuration
 
-Configuration can be provided via YAML file or environment variables. Environment variables take precedence and use the `GATEWAY_` prefix.
+Configuration can be provided via:
+1. **Embedded config** (compiled into binary) - lowest priority
+2. **YAML file** via `-config` flag - medium priority  
+3. **Environment variables** - highest priority
+
+Environment variables use the format: `<KEY>_<SUBKEY>` (e.g., `SERVER_PORT=7070`)
+
+### Configuration Priority
+
+```
+Environment Variables > External Config File > Embedded Config > Defaults
+```
+
+### Using Embedded Configuration
+
+The gateway includes a default configuration embedded at compile time. You can run it without any external config file:
+
+```bash
+# Run with embedded config (no -config flag needed)
+./gateway
+
+# Or with Docker
+docker run -p 7070:7070 api-gateway:latest
+```
+
+The embedded config provides sensible defaults for development and can be overridden with environment variables:
+
+```bash
+# Override embedded config with environment variables
+export SERVER_PORT=8080
+export LOGGING_LEVEL=debug
+export WHITELIST_ENABLED=false
+./gateway
+```
+
+### Using External Configuration
+
+Override the embedded config with an external YAML file:
+
+```bash
+# Copy example config
+cp config.example.yaml config.yaml
+
+# Edit config.yaml with your settings
+# ...
+
+# Run with external config
+./gateway -config config.yaml
+
+# Or with Docker
+docker run -p 7070:7070 \
+  -v ${PWD}/config.yaml:/app/config.yaml \
+  api-gateway:latest -config /app/config.yaml
+```
 
 ### Example Configuration
 
@@ -254,10 +318,20 @@ docker build -t api-gateway:latest .
 # Build image
 docker build -t api-gateway:latest .
 
-# Run container
+# Option 1: Run with embedded config (simplest)
+docker run -p 7070:7070 api-gateway:latest
+
+# Option 2: Run with external config file
 docker run -p 7070:7070 \
-  -v $(pwd)/config.yaml:/app/config.yaml \
+  -v ${PWD}/config.yaml:/app/config.yaml \
   api-gateway:latest -config /app/config.yaml
+
+# Option 3: Run with environment variables
+docker run -p 7070:7070 \
+  -e SERVER_PORT=7070 \
+  -e LOGGING_LEVEL=debug \
+  -e WHITELIST_ENABLED=false \
+  api-gateway:latest
 ```
 
 ### Kubernetes

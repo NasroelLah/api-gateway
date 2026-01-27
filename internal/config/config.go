@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -112,20 +113,32 @@ type MTLSConfig struct {
 
 // LoadConfig memuat konfigurasi dari ENV atau YAML
 // ENV variables take precedence over YAML file values
+// Priority: ENV > External Config File > Embedded Config
 func LoadConfig(configPath string) (*Config, error) {
+	return LoadConfigWithEmbedded(configPath, nil)
+}
+
+// LoadConfigWithEmbedded loads config with optional embedded default config
+// embeddedConfig should be the content of a YAML file (can be nil)
+// Priority: ENV > External Config File > Embedded Config
+func LoadConfigWithEmbedded(configPath string, embeddedConfig []byte) (*Config, error) {
 	v := viper.New()
 
 	// Set defaults
 	setDefaults(v)
 
-	// Enable automatic environment variable binding
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	// Load embedded config first (lowest priority)
+	if embeddedConfig != nil && len(embeddedConfig) > 0 {
+		v.SetConfigType("yaml")
+		if err := v.ReadConfig(bytes.NewReader(embeddedConfig)); err != nil {
+			return nil, fmt.Errorf("failed to read embedded config: %w", err)
+		}
+	}
 
-	// Load from YAML file if path provided
+	// Load from external YAML file if path provided (overrides embedded)
 	if configPath != "" {
 		v.SetConfigFile(configPath)
-		if err := v.ReadInConfig(); err != nil {
+		if err := v.MergeInConfig(); err != nil {
 			// Only return error if file was explicitly specified but not found
 			var configFileNotFoundError viper.ConfigFileNotFoundError
 			if !errors.As(err, &configFileNotFoundError) {
@@ -133,6 +146,10 @@ func LoadConfig(configPath string) (*Config, error) {
 			}
 		}
 	}
+
+	// Enable automatic environment variable binding (highest priority)
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
