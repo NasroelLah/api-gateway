@@ -172,3 +172,11 @@ tls:
     
     # Path to CA certificate for client verification
     ca_file: "/etc/tls/ca.crt"
+
+# =============================================================================
+# Authentication
+# =============================================================================
+auth:
+  enabled: true
+  api_key: ""  # let it empty for auto generate
+  header_name: "X-API-Key"
