@@ -84,6 +84,7 @@ func run(cfg *config.Config, logger *observability.Logger) error {
 		TracingEnabled:      cfg.Tracing.Enabled,
 		MetricsEnabled:      cfg.Metrics.Enabled,
 		MetricsPath:         cfg.Metrics.Path,
+		AuthEnabled:         cfg.Auth.Enabled,
 	}
 
 	deps := &server.RouterDependencies{
@@ -91,6 +92,7 @@ func run(cfg *config.Config, logger *observability.Logger) error {
 		ProxyMgr:    components.proxyMgr,
 		Whitelist:   components.whitelist,
 		RateLimiter: components.rateLimiter,
+		APIKeyAuth:  components.apiKeyAuth,
 		Metrics:     components.metrics,
 		Tracer:      components.tracer,
 	}
@@ -156,6 +158,7 @@ type components struct {
 	proxyMgr       *proxy.ProxyManager
 	whitelist      *security.IPWhitelist
 	rateLimiter    middleware.RateLimiter
+	apiKeyAuth     *middleware.APIKeyAuth
 	metrics        *observability.Metrics
 	tracer         trace.Tracer
 	tracerProvider *observability.TracerProvider
@@ -245,6 +248,26 @@ func initializeComponents(cfg *config.Config, logger *observability.Logger) (*co
 			zap.String("service_name", cfg.Tracing.ServiceName),
 			zap.String("exporter", cfg.Tracing.Exporter),
 		)
+	}
+
+	// Initialize API key auth if enabled
+	if cfg.Auth.Enabled {
+		c.apiKeyAuth = middleware.NewAPIKeyAuth(
+			cfg.Auth.APIKey,
+			cfg.Auth.HeaderName,
+			true,
+		)
+		// Log the API key if it was auto-generated (for initial setup)
+		if cfg.Auth.APIKey == "" {
+			logger.Info("API key authentication enabled (auto-generated key)",
+				zap.String("header_name", c.apiKeyAuth.GetHeaderName()),
+				zap.String("api_key", c.apiKeyAuth.GetAPIKey()),
+			)
+		} else {
+			logger.Info("API key authentication enabled",
+				zap.String("header_name", c.apiKeyAuth.GetHeaderName()),
+			)
+		}
 	}
 
 	return c, nil

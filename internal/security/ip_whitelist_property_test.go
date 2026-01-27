@@ -356,3 +356,305 @@ func TestProperty6_CIDRParsingAndMatching(t *testing.T) {
 
 	properties.TestingRun(t)
 }
+
+
+// MockDNSResolver for testing hostname resolution
+type MockDNSResolver struct {
+	records map[string][]net.IP
+}
+
+func NewMockDNSResolver() *MockDNSResolver {
+	return &MockDNSResolver{
+		records: make(map[string][]net.IP),
+	}
+}
+
+func (m *MockDNSResolver) AddRecord(hostname string, ips ...net.IP) {
+	m.records[hostname] = ips
+}
+
+func (m *MockDNSResolver) LookupIP(host string) ([]net.IP, error) {
+	if ips, ok := m.records[host]; ok {
+		return ips, nil
+	}
+	return nil, fmt.Errorf("no such host: %s", host)
+}
+
+// TestHostnameWhitelist tests hostname-based whitelist functionality
+func TestHostnameWhitelist(t *testing.T) {
+	mockDNS := NewMockDNSResolver()
+	mockDNS.AddRecord("server1.example.com", net.ParseIP("192.168.1.100"))
+	mockDNS.AddRecord("server2.example.com", net.ParseIP("192.168.1.101"), net.ParseIP("192.168.1.102"))
+
+	tests := []struct {
+		name      string
+		entries   []string
+		testIP    net.IP
+		hostname  string
+		wantIP    bool
+		wantHost  bool
+	}{
+		{
+			name:     "exact hostname matches resolved IP",
+			entries:  []string{"host:server1.example.com"},
+			testIP:   net.ParseIP("192.168.1.100"),
+			wantIP:   true,
+		},
+		{
+			name:     "exact hostname does not match different IP",
+			entries:  []string{"host:server1.example.com"},
+			testIP:   net.ParseIP("192.168.1.200"),
+			wantIP:   false,
+		},
+		{
+			name:     "hostname with multiple IPs matches any",
+			entries:  []string{"host:server2.example.com"},
+			testIP:   net.ParseIP("192.168.1.102"),
+			wantIP:   true,
+		},
+		{
+			name:     "hostname check - exact match",
+			entries:  []string{"host:server1.example.com"},
+			hostname: "server1.example.com",
+			wantHost: true,
+		},
+		{
+			name:     "hostname check - no match",
+			entries:  []string{"host:server1.example.com"},
+			hostname: "server2.example.com",
+			wantHost: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wl, err := NewIPWhitelist(tt.entries, WithDNSResolver(mockDNS), WithDNSCacheTTL(0))
+			if err != nil {
+				t.Fatalf("NewIPWhitelist() error = %v", err)
+			}
+
+			if tt.testIP != nil {
+				got := wl.IsAllowed(tt.testIP)
+				if got != tt.wantIP {
+					t.Errorf("IsAllowed(%v) = %v, want %v", tt.testIP, got, tt.wantIP)
+				}
+			}
+
+			if tt.hostname != "" {
+				got := wl.IsHostnameAllowed(tt.hostname)
+				if got != tt.wantHost {
+					t.Errorf("IsHostnameAllowed(%v) = %v, want %v", tt.hostname, got, tt.wantHost)
+				}
+			}
+		})
+	}
+}
+
+// TestDomainWhitelist tests domain-based whitelist functionality (including wildcards)
+func TestDomainWhitelist(t *testing.T) {
+	tests := []struct {
+		name     string
+		entries  []string
+		hostname string
+		want     bool
+	}{
+		{
+			name:     "wildcard domain matches subdomain",
+			entries:  []string{"*.example.com"},
+			hostname: "api.example.com",
+			want:     true,
+		},
+		{
+			name:     "wildcard domain matches nested subdomain",
+			entries:  []string{"*.example.com"},
+			hostname: "api.v1.example.com",
+			want:     true,
+		},
+		{
+			name:     "wildcard domain does NOT match base domain",
+			entries:  []string{"*.example.com"},
+			hostname: "example.com",
+			want:     false,
+		},
+		{
+			name:     "wildcard domain does NOT match different domain",
+			entries:  []string{"*.example.com"},
+			hostname: "api.other.com",
+			want:     false,
+		},
+		{
+			name:     "exact domain matches only itself",
+			entries:  []string{"domain:example.com"},
+			hostname: "example.com",
+			want:     true,
+		},
+		{
+			name:     "exact domain does NOT match subdomain",
+			entries:  []string{"domain:example.com"},
+			hostname: "api.example.com",
+			want:     false,
+		},
+		{
+			name:     "multiple domain entries - matches any",
+			entries:  []string{"*.example.com", "*.internal.net"},
+			hostname: "api.internal.net",
+			want:     true,
+		},
+		{
+			name:     "hostname with port is normalized",
+			entries:  []string{"*.example.com"},
+			hostname: "api.example.com:8080",
+			want:     true,
+		},
+		{
+			name:     "case insensitive matching",
+			entries:  []string{"*.Example.COM"},
+			hostname: "API.example.com",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wl, err := NewIPWhitelist(tt.entries)
+			if err != nil {
+				t.Fatalf("NewIPWhitelist() error = %v", err)
+			}
+
+			got := wl.IsHostnameAllowed(tt.hostname)
+			if got != tt.want {
+				t.Errorf("IsHostnameAllowed(%v) = %v, want %v", tt.hostname, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMixedWhitelist tests whitelist with mixed IP, hostname, and domain entries
+func TestMixedWhitelist(t *testing.T) {
+	mockDNS := NewMockDNSResolver()
+	mockDNS.AddRecord("server.example.com", net.ParseIP("10.0.0.50"))
+
+	entries := []string{
+		"192.168.1.0/24",           // CIDR
+		"10.0.0.1",                 // Single IP
+		"host:server.example.com", // Hostname
+		"*.internal.local",        // Wildcard domain
+		"domain:api.example.com",  // Exact domain
+	}
+
+	wl, err := NewIPWhitelist(entries, WithDNSResolver(mockDNS))
+	if err != nil {
+		t.Fatalf("NewIPWhitelist() error = %v", err)
+	}
+
+	// Test IP checks
+	ipTests := []struct {
+		ip   net.IP
+		want bool
+	}{
+		{net.ParseIP("192.168.1.100"), true},  // In CIDR
+		{net.ParseIP("192.168.2.100"), false}, // Not in CIDR
+		{net.ParseIP("10.0.0.1"), true},       // Exact IP
+		{net.ParseIP("10.0.0.2"), false},      // Different IP
+		{net.ParseIP("10.0.0.50"), true},      // Resolved from hostname
+	}
+
+	for _, tt := range ipTests {
+		got := wl.IsAllowed(tt.ip)
+		if got != tt.want {
+			t.Errorf("IsAllowed(%v) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+
+	// Test hostname checks
+	hostTests := []struct {
+		hostname string
+		want     bool
+	}{
+		{"server.example.com", true},      // Exact hostname
+		{"other.example.com", false},      // Different hostname
+		{"app.internal.local", true},      // Wildcard match
+		{"internal.local", false},         // Base domain (wildcard doesn't match)
+		{"api.example.com", true},         // Exact domain
+		{"v1.api.example.com", false},     // Subdomain of exact domain
+	}
+
+	for _, tt := range hostTests {
+		got := wl.IsHostnameAllowed(tt.hostname)
+		if got != tt.want {
+			t.Errorf("IsHostnameAllowed(%v) = %v, want %v", tt.hostname, got, tt.want)
+		}
+	}
+}
+
+// TestWhitelistReload tests hot-reload functionality
+func TestWhitelistReload(t *testing.T) {
+	wl, err := NewIPWhitelist([]string{"192.168.1.0/24"})
+	if err != nil {
+		t.Fatalf("NewIPWhitelist() error = %v", err)
+	}
+
+	// Initial check
+	if !wl.IsAllowed(net.ParseIP("192.168.1.100")) {
+		t.Error("Expected 192.168.1.100 to be allowed initially")
+	}
+
+	// Reload with new entries
+	err = wl.Reload([]string{"10.0.0.0/8", "*.example.com"})
+	if err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	// Old entry should be denied
+	if wl.IsAllowed(net.ParseIP("192.168.1.100")) {
+		t.Error("Expected 192.168.1.100 to be denied after reload")
+	}
+
+	// New entry should be allowed
+	if !wl.IsAllowed(net.ParseIP("10.0.0.1")) {
+		t.Error("Expected 10.0.0.1 to be allowed after reload")
+	}
+
+	// Domain entry should work
+	if !wl.IsHostnameAllowed("api.example.com") {
+		t.Error("Expected api.example.com to be allowed after reload")
+	}
+}
+
+// TestEntryTypeDetection tests automatic entry type detection
+func TestEntryTypeDetection(t *testing.T) {
+	tests := []struct {
+		entry    string
+		wantType EntryType
+		wantErr  bool
+	}{
+		{"192.168.1.1", EntryTypeIP, false},
+		{"10.0.0.0/8", EntryTypeIP, false},
+		{"host:server.example.com", EntryTypeHostname, false},
+		{"domain:example.com", EntryTypeDomain, false},
+		{"*.example.com", EntryTypeDomain, false},
+		{"server.example.com", EntryTypeHostname, false}, // Auto-detected as hostname
+		{"", EntryTypeIP, true},                          // Error
+		{"   ", EntryTypeIP, true},                       // Error
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.entry, func(t *testing.T) {
+			wl, err := NewIPWhitelist([]string{tt.entry})
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Expected error for entry %q", tt.entry)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewIPWhitelist() error = %v", err)
+			}
+
+			counts := wl.CountByType()
+			if counts[tt.wantType] != 1 {
+				t.Errorf("Entry %q: expected type %v, got counts %v", tt.entry, tt.wantType, counts)
+			}
+		})
+	}
+}

@@ -7,56 +7,157 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
-// IPWhitelist mengelola daftar IP/CIDR yang diizinkan
-// Implements default deny security model - only IPs in whitelist are allowed
-type IPWhitelist struct {
-	mu      sync.RWMutex
-	entries []*net.IPNet
+// EntryType represents the type of whitelist entry
+type EntryType int
+
+const (
+	EntryTypeIP       EntryType = iota // Single IP or CIDR
+	EntryTypeHostname                  // Exact hostname (requires DNS lookup)
+	EntryTypeDomain                    // Domain with wildcard support (e.g., *.example.com)
+)
+
+// WhitelistEntry represents a single whitelist entry
+type WhitelistEntry struct {
+	Type       EntryType
+	Original   string     // Original entry string
+	IPNet      *net.IPNet // For IP/CIDR entries
+	Hostname   string     // For hostname entries (exact match)
+	Domain     string     // For domain entries (suffix match)
+	IsWildcard bool       // True if domain starts with *.
 }
 
-// NewIPWhitelist membuat instance baru dengan daftar IP/CIDR
-// Accepts both single IPs (e.g., "192.168.1.1") and CIDR notation (e.g., "10.0.0.0/8")
-func NewIPWhitelist(entries []string) (*IPWhitelist, error) {
+// DNSResolver interface for DNS lookups (allows mocking in tests)
+type DNSResolver interface {
+	LookupIP(host string) ([]net.IP, error)
+}
+
+// DefaultDNSResolver uses net.LookupIP for DNS resolution
+type DefaultDNSResolver struct{}
+
+func (d *DefaultDNSResolver) LookupIP(host string) ([]net.IP, error) {
+	return net.LookupIP(host)
+}
+
+// dnsCacheEntry stores cached DNS results
+type dnsCacheEntry struct {
+	IPs       []net.IP
+	ExpiresAt time.Time
+}
+
+// IPWhitelist mengelola daftar IP/CIDR/Hostname/Domain yang diizinkan
+// Implements default deny security model
+// Supports:
+//   - Single IPs: "192.168.1.1"
+//   - CIDR notation: "10.0.0.0/8"
+//   - Exact hostnames: "server.example.com" (resolved via DNS)
+//   - Wildcard domains: "*.example.com" (matches any subdomain)
+//   - Exact domains: "example.com" (matches only example.com)
+type IPWhitelist struct {
+	mu          sync.RWMutex
+	ipEntries   []*net.IPNet     // IP/CIDR entries for fast lookup
+	hostEntries []WhitelistEntry // Hostname and domain entries
+	allEntries  []WhitelistEntry // All entries with metadata
+	dnsResolver DNSResolver      // DNS resolver for hostname lookups
+	dnsCacheTTL time.Duration    // DNS cache TTL
+	dnsCache    map[string]*dnsCacheEntry
+	cacheMu     sync.RWMutex
+}
+
+// WhitelistOption configures the whitelist
+type WhitelistOption func(*IPWhitelist)
+
+// WithDNSResolver sets a custom DNS resolver
+func WithDNSResolver(resolver DNSResolver) WhitelistOption {
+	return func(w *IPWhitelist) {
+		w.dnsResolver = resolver
+	}
+}
+
+// WithDNSCacheTTL sets the DNS cache TTL (0 disables caching)
+func WithDNSCacheTTL(ttl time.Duration) WhitelistOption {
+	return func(w *IPWhitelist) {
+		w.dnsCacheTTL = ttl
+	}
+}
+
+
+// NewIPWhitelist membuat instance baru dengan daftar IP/CIDR/Hostname/Domain
+// Accepts:
+//   - Single IPs: "192.168.1.1"
+//   - CIDR notation: "10.0.0.0/8"
+//   - Hostnames: "host:server.example.com" or just hostname if not parseable as IP
+//   - Wildcard domains: "*.example.com"
+//   - Exact domains: "domain:example.com"
+func NewIPWhitelist(entries []string, opts ...WhitelistOption) (*IPWhitelist, error) {
 	w := &IPWhitelist{
-		entries: make([]*net.IPNet, 0, len(entries)),
+		ipEntries:   make([]*net.IPNet, 0),
+		hostEntries: make([]WhitelistEntry, 0),
+		allEntries:  make([]WhitelistEntry, 0, len(entries)),
+		dnsResolver: &DefaultDNSResolver{},
+		dnsCacheTTL: 5 * time.Minute, // Default 5 min cache
+		dnsCache:    make(map[string]*dnsCacheEntry),
+	}
+
+	for _, opt := range opts {
+		opt(w)
 	}
 
 	for _, entry := range entries {
-		ipNet, err := parseIPOrCIDR(entry)
-		if err != nil {
+		if err := w.addEntry(entry); err != nil {
 			return nil, fmt.Errorf("invalid whitelist entry %q: %w", entry, err)
 		}
-		w.entries = append(w.entries, ipNet)
 	}
 
 	return w, nil
 }
 
-// parseIPOrCIDR parses a string as either a single IP or CIDR notation
-func parseIPOrCIDR(entry string) (*net.IPNet, error) {
+// addEntry parses and adds a single entry to the whitelist
+func (w *IPWhitelist) addEntry(entry string) error {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
-		return nil, errors.New("empty entry")
+		return errors.New("empty entry")
 	}
 
-	// Try parsing as CIDR first
+	// Check for explicit prefixes
+	if strings.HasPrefix(entry, "host:") {
+		return w.addHostnameEntry(strings.TrimPrefix(entry, "host:"))
+	}
+	if strings.HasPrefix(entry, "domain:") {
+		return w.addDomainEntry(strings.TrimPrefix(entry, "domain:"))
+	}
+
+	// Check for wildcard domain pattern
+	if strings.HasPrefix(entry, "*.") {
+		return w.addWildcardDomainEntry(entry)
+	}
+
+	// Try parsing as CIDR
 	if strings.Contains(entry, "/") {
-		_, ipNet, err := net.ParseCIDR(entry)
-		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR: %w", err)
-		}
-		return ipNet, nil
+		return w.addCIDREntry(entry)
 	}
 
-	// Parse as single IP
-	ip := net.ParseIP(entry)
-	if ip == nil {
-		return nil, fmt.Errorf("invalid IP address: %s", entry)
+	// Try parsing as IP
+	if ip := net.ParseIP(entry); ip != nil {
+		return w.addIPEntry(entry, ip)
 	}
 
-	// Convert single IP to /32 (IPv4) or /128 (IPv6) CIDR
+	// Assume it's a hostname if it looks like one (contains dots, not an IP)
+	if strings.Contains(entry, ".") && !isIPAddress(entry) {
+		return w.addHostnameEntry(entry)
+	}
+
+	return fmt.Errorf("cannot determine entry type: %s", entry)
+}
+
+// isIPAddress checks if a string looks like an IP address
+func isIPAddress(s string) bool {
+	return net.ParseIP(s) != nil
+}
+
+func (w *IPWhitelist) addIPEntry(original string, ip net.IP) error {
 	var mask net.IPMask
 	if ip.To4() != nil {
 		mask = net.CIDRMask(32, 32)
@@ -65,8 +166,83 @@ func parseIPOrCIDR(entry string) (*net.IPNet, error) {
 		mask = net.CIDRMask(128, 128)
 	}
 
-	return &net.IPNet{IP: ip, Mask: mask}, nil
+	ipNet := &net.IPNet{IP: ip, Mask: mask}
+	w.ipEntries = append(w.ipEntries, ipNet)
+	w.allEntries = append(w.allEntries, WhitelistEntry{
+		Type:     EntryTypeIP,
+		Original: original,
+		IPNet:    ipNet,
+	})
+	return nil
 }
+
+func (w *IPWhitelist) addCIDREntry(entry string) error {
+	_, ipNet, err := net.ParseCIDR(entry)
+	if err != nil {
+		return fmt.Errorf("invalid CIDR: %w", err)
+	}
+
+	w.ipEntries = append(w.ipEntries, ipNet)
+	w.allEntries = append(w.allEntries, WhitelistEntry{
+		Type:     EntryTypeIP,
+		Original: entry,
+		IPNet:    ipNet,
+	})
+	return nil
+}
+
+func (w *IPWhitelist) addHostnameEntry(hostname string) error {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return errors.New("empty hostname")
+	}
+
+	entry := WhitelistEntry{
+		Type:     EntryTypeHostname,
+		Original: hostname,
+		Hostname: strings.ToLower(hostname),
+	}
+	w.hostEntries = append(w.hostEntries, entry)
+	w.allEntries = append(w.allEntries, entry)
+	return nil
+}
+
+func (w *IPWhitelist) addDomainEntry(domain string) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return errors.New("empty domain")
+	}
+
+	entry := WhitelistEntry{
+		Type:       EntryTypeDomain,
+		Original:   domain,
+		Domain:     strings.ToLower(domain),
+		IsWildcard: false,
+	}
+	w.hostEntries = append(w.hostEntries, entry)
+	w.allEntries = append(w.allEntries, entry)
+	return nil
+}
+
+func (w *IPWhitelist) addWildcardDomainEntry(entry string) error {
+	// Remove *. prefix to get the base domain
+	domain := strings.TrimPrefix(entry, "*.")
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return errors.New("empty domain after wildcard")
+	}
+
+	wlEntry := WhitelistEntry{
+		Type:       EntryTypeDomain,
+		Original:   entry,
+		Domain:     strings.ToLower(domain),
+		IsWildcard: true,
+	}
+	w.hostEntries = append(w.hostEntries, wlEntry)
+	w.allEntries = append(w.allEntries, wlEntry)
+	return nil
+}
+
 
 // IsAllowed memeriksa apakah IP diizinkan
 // Returns true if IP matches any entry in whitelist, false otherwise (default deny)
@@ -78,9 +254,16 @@ func (w *IPWhitelist) IsAllowed(ip net.IP) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	// Default deny - only allow if IP matches an entry
-	for _, entry := range w.entries {
+	// Check IP/CIDR entries first (fast path)
+	for _, entry := range w.ipEntries {
 		if entry.Contains(ip) {
+			return true
+		}
+	}
+
+	// Check hostname entries (requires reverse DNS or cached lookups)
+	for _, entry := range w.hostEntries {
+		if w.matchesHostEntry(ip, entry) {
 			return true
 		}
 	}
@@ -88,38 +271,158 @@ func (w *IPWhitelist) IsAllowed(ip net.IP) bool {
 	return false
 }
 
-// Add menambahkan entry baru ke whitelist
-func (w *IPWhitelist) Add(entry string) error {
-	ipNet, err := parseIPOrCIDR(entry)
-	if err != nil {
-		return err
+// IsHostnameAllowed checks if a hostname is allowed
+// Useful for checking request Host header or SNI
+func (w *IPWhitelist) IsHostnameAllowed(hostname string) bool {
+	if hostname == "" {
+		return false
 	}
 
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	// Remove port if present
+	if h, _, err := net.SplitHostPort(hostname); err == nil {
+		hostname = h
+	}
+
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for _, entry := range w.hostEntries {
+		if w.matchesHostname(hostname, entry) {
+			return true
+		}
+	}
+
+	// Also check if hostname resolves to an allowed IP
+	ips, err := w.resolveHostname(hostname)
+	if err == nil {
+		for _, ip := range ips {
+			for _, ipEntry := range w.ipEntries {
+				if ipEntry.Contains(ip) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// matchesHostEntry checks if an IP matches a hostname/domain entry
+func (w *IPWhitelist) matchesHostEntry(ip net.IP, entry WhitelistEntry) bool {
+	switch entry.Type {
+	case EntryTypeHostname:
+		// Resolve hostname and check if IP matches
+		ips, err := w.resolveHostname(entry.Hostname)
+		if err != nil {
+			return false
+		}
+		for _, resolvedIP := range ips {
+			if resolvedIP.Equal(ip) {
+				return true
+			}
+		}
+	case EntryTypeDomain:
+		// For domain entries, we can't match by IP directly
+		// This would require reverse DNS which is unreliable
+		// Domain entries are primarily for hostname-based checks
+		return false
+	}
+	return false
+}
+
+// matchesHostname checks if a hostname matches a hostname/domain entry
+func (w *IPWhitelist) matchesHostname(hostname string, entry WhitelistEntry) bool {
+	switch entry.Type {
+	case EntryTypeHostname:
+		return hostname == entry.Hostname
+	case EntryTypeDomain:
+		if entry.IsWildcard {
+			// Wildcard: *.example.com matches sub.example.com, a.b.example.com
+			// but NOT example.com itself
+			return strings.HasSuffix(hostname, "."+entry.Domain)
+		}
+		// Exact domain match
+		return hostname == entry.Domain
+	}
+	return false
+}
+
+// resolveHostname resolves a hostname to IPs with caching
+func (w *IPWhitelist) resolveHostname(hostname string) ([]net.IP, error) {
+	if w.dnsCacheTTL > 0 {
+		w.cacheMu.RLock()
+		if cached, ok := w.dnsCache[hostname]; ok && time.Now().Before(cached.ExpiresAt) {
+			w.cacheMu.RUnlock()
+			return cached.IPs, nil
+		}
+		w.cacheMu.RUnlock()
+	}
+
+	ips, err := w.dnsResolver.LookupIP(hostname)
+	if err != nil {
+		return nil, err
+	}
+
+	if w.dnsCacheTTL > 0 {
+		w.cacheMu.Lock()
+		w.dnsCache[hostname] = &dnsCacheEntry{
+			IPs:       ips,
+			ExpiresAt: time.Now().Add(w.dnsCacheTTL),
+		}
+		w.cacheMu.Unlock()
+	}
+
+	return ips, nil
+}
+
+// Add menambahkan entry baru ke whitelist
+func (w *IPWhitelist) Add(entry string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
-	w.entries = append(w.entries, ipNet)
-	return nil
+	return w.addEntry(entry)
 }
 
 // Reload me-reload whitelist dari konfigurasi baru
 // Replaces all existing entries with new ones atomically
 func (w *IPWhitelist) Reload(entries []string) error {
-	newEntries := make([]*net.IPNet, 0, len(entries))
+	newIPEntries := make([]*net.IPNet, 0)
+	newHostEntries := make([]WhitelistEntry, 0)
+	newAllEntries := make([]WhitelistEntry, 0, len(entries))
+
+	// Create temporary whitelist to parse entries
+	temp := &IPWhitelist{
+		ipEntries:   newIPEntries,
+		hostEntries: newHostEntries,
+		allEntries:  newAllEntries,
+	}
 
 	for _, entry := range entries {
-		ipNet, err := parseIPOrCIDR(entry)
-		if err != nil {
+		if err := temp.addEntry(entry); err != nil {
 			return fmt.Errorf("invalid whitelist entry %q: %w", entry, err)
 		}
-		newEntries = append(newEntries, ipNet)
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.entries = newEntries
+	w.ipEntries = temp.ipEntries
+	w.hostEntries = temp.hostEntries
+	w.allEntries = temp.allEntries
+
+	// Clear DNS cache on reload
+	w.cacheMu.Lock()
+	w.dnsCache = make(map[string]*dnsCacheEntry)
+	w.cacheMu.Unlock()
+
 	return nil
+}
+
+// ClearDNSCache clears the DNS cache
+func (w *IPWhitelist) ClearDNSCache() {
+	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	w.dnsCache = make(map[string]*dnsCacheEntry)
 }
 
 
@@ -128,10 +431,32 @@ func (w *IPWhitelist) Entries() []string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	result := make([]string, len(w.entries))
-	for i, entry := range w.entries {
+	result := make([]string, len(w.allEntries))
+	for i, entry := range w.allEntries {
+		result[i] = entry.Original
+	}
+	return result
+}
+
+// IPEntries returns only IP/CIDR entries as strings
+func (w *IPWhitelist) IPEntries() []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make([]string, len(w.ipEntries))
+	for i, entry := range w.ipEntries {
 		result[i] = entry.String()
 	}
+	return result
+}
+
+// HostEntries returns hostname and domain entries
+func (w *IPWhitelist) HostEntries() []WhitelistEntry {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make([]WhitelistEntry, len(w.hostEntries))
+	copy(result, w.hostEntries)
 	return result
 }
 
@@ -174,16 +499,61 @@ func ParseIP(r *http.Request, trustProxy bool) (net.IP, error) {
 	return ip, nil
 }
 
+// ParseHostname extracts hostname from request Host header
+func ParseHostname(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+
+	// Remove port if present
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(h)
+	}
+
+	return strings.ToLower(host)
+}
+
 // IsEmpty returns true if whitelist has no entries
 func (w *IPWhitelist) IsEmpty() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return len(w.entries) == 0
+	return len(w.allEntries) == 0
 }
 
 // Count returns the number of entries in the whitelist
 func (w *IPWhitelist) Count() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return len(w.entries)
+	return len(w.allEntries)
+}
+
+// CountByType returns count of entries by type
+func (w *IPWhitelist) CountByType() map[EntryType]int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	counts := make(map[EntryType]int)
+	for _, entry := range w.allEntries {
+		counts[entry.Type]++
+	}
+	return counts
+}
+
+// String returns entry type as string
+func (t EntryType) String() string {
+	switch t {
+	case EntryTypeIP:
+		return "ip"
+	case EntryTypeHostname:
+		return "hostname"
+	case EntryTypeDomain:
+		return "domain"
+	default:
+		return "unknown"
+	}
 }

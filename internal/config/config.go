@@ -13,12 +13,20 @@ import (
 type Config struct {
 	Server    ServerConfig    `mapstructure:"server"`
 	Proxy     ProxyConfig     `mapstructure:"proxy"`
+	Auth      AuthConfig      `mapstructure:"auth"`
 	Whitelist WhitelistConfig `mapstructure:"whitelist"`
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 	Logging   LoggingConfig   `mapstructure:"logging"`
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
 	Tracing   TracingConfig   `mapstructure:"tracing"`
 	TLS       TLSConfig       `mapstructure:"tls"`
+}
+
+// AuthConfig holds API key authentication configuration
+type AuthConfig struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	APIKey     string `mapstructure:"api_key"`
+	HeaderName string `mapstructure:"header_name"`
 }
 
 type ServerConfig struct {
@@ -146,7 +154,7 @@ func LoadConfigWithViper(v *viper.Viper) (*Config, error) {
 func setDefaults(v *viper.Viper) {
 	// Server defaults
 	v.SetDefault("server.host", "0.0.0.0")
-	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.port", 7070)
 	v.SetDefault("server.read_timeout", 30*time.Second)
 	v.SetDefault("server.write_timeout", 30*time.Second)
 	v.SetDefault("server.idle_timeout", 120*time.Second)
@@ -188,6 +196,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tls.enabled", false)
 	v.SetDefault("tls.min_version", "1.2")
 	v.SetDefault("tls.mtls.enabled", false)
+
+	// Auth defaults
+	v.SetDefault("auth.enabled", false)
+	v.SetDefault("auth.api_key", "")
+	v.SetDefault("auth.header_name", "X-API-Key")
 }
 
 

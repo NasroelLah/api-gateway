@@ -30,7 +30,9 @@ type RouterConfig struct {
 	MetricsEnabled bool
 	// MetricsPath is the path for metrics endpoint
 	MetricsPath string
-	// BypassPaths are paths that bypass whitelist and rate limiting
+	// AuthEnabled enables API key authentication
+	AuthEnabled bool
+	// BypassPaths are paths that bypass whitelist, rate limiting, and auth
 	BypassPaths []string
 }
 
@@ -42,6 +44,7 @@ type RouterDependencies struct {
 	RateLimiter middleware.RateLimiter
 	Metrics     *observability.Metrics
 	Tracer      trace.Tracer
+	APIKeyAuth  *middleware.APIKeyAuth
 }
 
 // HealthStatus merepresentasikan status kesehatan Gateway
@@ -111,6 +114,14 @@ func SetupRouter(router chi.Router, cfg *RouterConfig, deps *RouterDependencies)
 	if cfg.RateLimitEnabled && deps.RateLimiter != nil {
 		router.Use(middleware.RateLimitByIPWithBypassMiddleware(
 			deps.RateLimiter,
+			bypassPaths,
+		))
+	}
+
+	// 9. API Key Auth middleware (if enabled)
+	if cfg.AuthEnabled && deps.APIKeyAuth != nil {
+		router.Use(middleware.APIKeyMiddlewareWithBypass(
+			deps.APIKeyAuth,
 			bypassPaths,
 		))
 	}
@@ -224,6 +235,7 @@ func NewDefaultRouterConfig() *RouterConfig {
 		TracingEnabled:      false,
 		MetricsEnabled:      true,
 		MetricsPath:         "/metrics",
+		AuthEnabled:         false,
 		BypassPaths:         []string{},
 	}
 }
