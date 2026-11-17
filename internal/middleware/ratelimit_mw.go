@@ -109,13 +109,10 @@ func RateLimitByIPWithBypassMiddleware(limiter RateLimiter, bypassPaths []string
 // extractRateLimitKey extracts the client IP to use as rate limit key
 // Uses X-Real-IP (set by sanitizer) or falls back to RemoteAddr
 func extractRateLimitKey(r *http.Request) string {
-	// Prefer X-Real-IP (should be set by HeaderSanitizer)
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return normalizeIP(ip)
+	if ip := GetSanitizedClientIP(r); ip != "" {
+		return ip
 	}
-
-	// Fallback to RemoteAddr
-	return normalizeIP(r.RemoteAddr)
+	return "unknown"
 }
 
 // normalizeIP normalizes an IP address string by removing port if present

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -31,11 +32,12 @@ type AuthConfig struct {
 }
 
 type ServerConfig struct {
-	Host         string        `mapstructure:"host"`
-	Port         int           `mapstructure:"port"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+	Host           string        `mapstructure:"host"`
+	Port           int           `mapstructure:"port"`
+	ReadTimeout    time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout   time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout    time.Duration `mapstructure:"idle_timeout"`
+	TrustedProxies []string      `mapstructure:"trusted_proxies"`
 }
 
 type ProxyConfig struct {
@@ -202,17 +204,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.port", 7070)
 	v.SetDefault("server.read_timeout", 30*time.Second)
-	v.SetDefault("server.write_timeout", 30*time.Second)
+	v.SetDefault("server.write_timeout", 90*time.Second)
 	v.SetDefault("server.idle_timeout", 120*time.Second)
+	v.SetDefault("server.trusted_proxies", []string{})
 
 	// Proxy defaults
 	v.SetDefault("proxy.max_idle_conns", 1000)
 	v.SetDefault("proxy.max_idle_conns_per_host", 100)
 	v.SetDefault("proxy.timeout", 60*time.Second)
-	v.SetDefault("proxy.dynamic_upstream.enabled", true)
+	v.SetDefault("proxy.dynamic_upstream.enabled", false)
 	v.SetDefault("proxy.dynamic_upstream.header_name", "X-Upstream-Target")
-	v.SetDefault("proxy.dynamic_upstream.allowed_hosts", []string{"*"})
-	// Set empty upstreams by default - dynamic upstream will handle routing
+	v.SetDefault("proxy.dynamic_upstream.allowed_hosts", []string{})
+	// Set empty upstreams by default; static routes must be configured explicitly.
 	v.SetDefault("proxy.upstreams", []map[string]string{})
 
 	// Whitelist defaults
@@ -308,6 +311,16 @@ func (c *Config) Validate() error {
 			Message: "must be positive",
 		})
 	}
+	for _, proxy := range c.Server.TrustedProxies {
+		if net.ParseIP(proxy) == nil {
+			if _, _, err := net.ParseCIDR(proxy); err != nil {
+				errs = append(errs, ValidationError{
+					Field:   "server.trusted_proxies",
+					Message: fmt.Sprintf("invalid IP or CIDR: %q", proxy),
+				})
+			}
+		}
+	}
 
 	// Validate proxy config
 	if c.Proxy.MaxIdleConns <= 0 {
@@ -361,19 +374,14 @@ func (c *Config) Validate() error {
 				Message: "must be positive when rate limiting is enabled",
 			})
 		}
-		validTypes := map[string]bool{"memory": true, "redis": true}
-		if !validTypes[c.RateLimit.Type] {
-			errs = append(errs, ValidationError{
-				Field:   "rate_limit.type",
-				Message: "must be 'memory' or 'redis'",
-			})
-		}
-		if c.RateLimit.Type == "redis" && c.RateLimit.Redis.Address == "" {
-			errs = append(errs, ValidationError{
-				Field:   "rate_limit.redis.address",
-				Message: "required when rate limit type is 'redis'",
-			})
-		}
+	}
+	validTypes := map[string]bool{"memory": true}
+	if !validTypes[c.RateLimit.Type] {
+		errMessage := "must be 'memory'; redis is not implemented"
+		errs = append(errs, ValidationError{
+			Field:   "rate_limit.type",
+			Message: errMessage,
+		})
 	}
 
 	// Validate logging config

@@ -20,8 +20,8 @@ import (
 type RouterConfig struct {
 	// WhitelistEnabled enables IP whitelist checking
 	WhitelistEnabled bool
-	// WhitelistTrustProxy trusts X-Forwarded-For from proxies
-	WhitelistTrustProxy bool
+	// TrustedProxies are the only peers whose forwarded headers are accepted.
+	TrustedProxies []string
 	// RateLimitEnabled enables rate limiting
 	RateLimitEnabled bool
 	// TracingEnabled enables OpenTelemetry tracing
@@ -83,8 +83,8 @@ func SetupRouter(router chi.Router, cfg *RouterConfig, deps *RouterDependencies)
 	// 2. Request ID middleware - generate unique ID for each request
 	router.Use(middleware.RequestIDMiddleware)
 
-	// 3. Header Sanitizer - sanitize forwarded headers
-	router.Use(middleware.HeaderSanitizer)
+	// 3. Sanitize forwarding headers using explicitly trusted proxy hops.
+	router.Use(middleware.HeaderSanitizerWithTrust(cfg.TrustedProxies))
 
 	// 4. Tracing middleware (if enabled)
 	if cfg.TracingEnabled && deps.Tracer != nil {
@@ -105,7 +105,7 @@ func SetupRouter(router chi.Router, cfg *RouterConfig, deps *RouterDependencies)
 	if cfg.WhitelistEnabled && deps.Whitelist != nil {
 		router.Use(middleware.WhitelistMiddlewareWithBypass(
 			deps.Whitelist,
-			cfg.WhitelistTrustProxy,
+			false,
 			bypassPaths,
 		))
 	}
@@ -230,7 +230,6 @@ func writeErrorJSON(w http.ResponseWriter, statusCode int, message string) {
 func NewDefaultRouterConfig() *RouterConfig {
 	return &RouterConfig{
 		WhitelistEnabled:    true,
-		WhitelistTrustProxy: false,
 		RateLimitEnabled:    true,
 		TracingEnabled:      false,
 		MetricsEnabled:      true,

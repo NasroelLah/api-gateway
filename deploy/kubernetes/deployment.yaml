@@ -33,13 +33,11 @@ spec:
         - name: gateway
           image: api-gateway:latest
           imagePullPolicy: IfNotPresent
+          args: ["-config", "/etc/gateway/config.yaml"]
           ports:
             - name: http
               containerPort: 7070
               protocol: TCP
-          env:
-            - name: GATEWAY_CONFIG_PATH
-              value: "/etc/gateway/config.yaml"
           resources:
             requests:
               cpu: "100m"

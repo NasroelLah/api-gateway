@@ -119,13 +119,13 @@ func run(cfg *config.Config, logger *observability.Logger) error {
 
 	// Setup router with middleware and routes
 	routerCfg := &server.RouterConfig{
-		WhitelistEnabled:    cfg.Whitelist.Enabled,
-		WhitelistTrustProxy: false,
-		RateLimitEnabled:    cfg.RateLimit.Enabled,
-		TracingEnabled:      cfg.Tracing.Enabled,
-		MetricsEnabled:      cfg.Metrics.Enabled,
-		MetricsPath:         cfg.Metrics.Path,
-		AuthEnabled:         cfg.Auth.Enabled,
+		WhitelistEnabled: cfg.Whitelist.Enabled,
+		TrustedProxies:   cfg.Server.TrustedProxies,
+		RateLimitEnabled: cfg.RateLimit.Enabled,
+		TracingEnabled:   cfg.Tracing.Enabled,
+		MetricsEnabled:   cfg.Metrics.Enabled,
+		MetricsPath:      cfg.Metrics.Path,
+		AuthEnabled:      cfg.Auth.Enabled,
 	}
 
 	deps := &server.RouterDependencies{
@@ -211,6 +211,9 @@ func (c *components) cleanup() {
 	if c.proxyMgr != nil {
 		c.proxyMgr.Close()
 	}
+	if c.whitelist != nil {
+		c.whitelist.Close()
+	}
 	if c.inMemoryRL != nil {
 		c.inMemoryRL.Stop()
 	}
@@ -224,7 +227,12 @@ func (c *components) cleanup() {
 // initializeComponents creates and configures all gateway components
 func initializeComponents(cfg *config.Config, logger *observability.Logger) (*components, error) {
 	c := &components{}
-
+	initialized := false
+	defer func() {
+		if !initialized {
+			c.cleanup()
+		}
+	}()
 	// Initialize proxy manager
 	c.proxyMgr = proxy.NewProxyManager(&cfg.Proxy)
 	logger.Info("proxy manager initialized",
@@ -257,15 +265,7 @@ func initializeComponents(cfg *config.Config, logger *observability.Logger) (*co
 				zap.Int("burst", cfg.RateLimit.Burst),
 			)
 		case "redis":
-			// Redis rate limiter requires additional setup
-			// For now, fall back to in-memory if Redis is not configured
-			logger.Warn("Redis rate limiter not fully implemented, using in-memory")
-			rl := middleware.NewInMemoryRateLimiter(
-				cfg.RateLimit.RequestsPerSecond,
-				cfg.RateLimit.Burst,
-			)
-			c.rateLimiter = rl
-			c.inMemoryRL = rl
+			return nil, fmt.Errorf("Redis rate limiting is not implemented")
 		default:
 			return nil, fmt.Errorf("unsupported rate limiter type: %s", cfg.RateLimit.Type)
 		}
@@ -311,5 +311,6 @@ func initializeComponents(cfg *config.Config, logger *observability.Logger) (*co
 		}
 	}
 
+	initialized = true
 	return c, nil
 }

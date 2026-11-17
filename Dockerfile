@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27.4-alpine AS builder
 
 # Install ca-certificates for HTTPS requests
 RUN apk add --no-cache ca-certificates git
@@ -16,7 +16,7 @@ COPY . .
 # Build the binary with optimizations
 # CGO_ENABLED=0 for static binary
 # -ldflags for smaller binary size
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-w -s -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo 'dev')" \
     -o /gateway \
     ./cmd/gateway

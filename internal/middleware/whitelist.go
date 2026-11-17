@@ -20,10 +20,8 @@ type ErrorResponse struct {
 func WhitelistMiddleware(whitelist *security.IPWhitelist, trustProxy bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Extract client IP from request
-			clientIP, err := security.ParseIP(r, trustProxy)
-			if err != nil {
-				// Cannot determine client IP - deny access
+			clientIP := net.ParseIP(GetSanitizedClientIP(r))
+			if clientIP == nil {
 				writeErrorResponse(w, r, http.StatusForbidden, "access denied")
 				return
 			}
@@ -57,9 +55,8 @@ func WhitelistMiddlewareWithBypass(whitelist *security.IPWhitelist, trustProxy b
 				return
 			}
 
-			// Extract client IP from request
-			clientIP, err := security.ParseIP(r, trustProxy)
-			if err != nil {
+			clientIP := net.ParseIP(GetSanitizedClientIP(r))
+			if clientIP == nil {
 				writeErrorResponse(w, r, http.StatusForbidden, "access denied")
 				return
 			}

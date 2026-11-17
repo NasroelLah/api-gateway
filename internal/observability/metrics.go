@@ -87,15 +87,23 @@ func NewMetricsWithDefaults() *Metrics {
 // RecordRequest mencatat metrics untuk request
 // Requirements: 5.2, 5.3
 func (m *Metrics) RecordRequest(method, path string, statusCode int, duration time.Duration) {
+	method = boundedMethod(method)
+	path = boundedRoute(path)
 	statusCodeStr := statusCodeToString(statusCode)
 	m.RequestsTotal.WithLabelValues(method, path, statusCodeStr).Inc()
 	m.RequestDuration.WithLabelValues(method, path).Observe(duration.Seconds())
 }
 
+
 // RecordUpstreamError mencatat error dari upstream
 // Requirements: 5.4
-func (m *Metrics) RecordUpstreamError(upstream, errorType string) {
-	m.UpstreamErrors.WithLabelValues(upstream, errorType).Inc()
+func (m *Metrics) RecordUpstreamError(_ string, errorType string) {
+	switch errorType {
+	case "unreachable", "timeout":
+	default:
+		errorType = "unknown"
+	}
+	m.UpstreamErrors.WithLabelValues("unknown", errorType).Inc()
 }
 
 // SetActiveConnections sets the number of active connections
@@ -108,6 +116,22 @@ func (m *Metrics) SetActiveConnections(count float64) {
 // Requirements: 5.5
 func (m *Metrics) SetIdleConnections(count float64) {
 	m.IdleConns.Set(count)
+}
+
+func boundedMethod(method string) string {
+	switch method {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE":
+		return method
+	default:
+		return "other"
+	}
+}
+
+func boundedRoute(path string) string {
+	if path == "" {
+		return "unmatched"
+	}
+	return path
 }
 
 // statusCodeToString converts status code to string for labels

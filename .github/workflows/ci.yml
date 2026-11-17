@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./cmd/gateway
+      - name: Check vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

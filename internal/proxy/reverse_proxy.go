@@ -24,7 +24,7 @@ var HopByHopHeaders = []string{
 	"Proxy-Authenticate",
 	"Proxy-Authorization",
 	"Te",
-	"Trailers",
+	"Trailer",
 	"Transfer-Encoding",
 	"Upgrade",
 }
@@ -167,12 +167,8 @@ func (pm *ProxyManager) PassthroughDirector(target *url.URL) func(*http.Request)
 		// HTTP method is already set (no modification needed)
 		// Body is handled by ReverseProxy (no modification needed)
 
-		// Remove hop-by-hop headers
-		for _, h := range HopByHopHeaders {
-			req.Header.Del(h)
-		}
 
-		// All other headers (including Authorization, Content-Type) remain intact
+		// ReverseProxy removes hop-by-hop headers and preserves protocol upgrades.
 
 		// Add gateway headers
 		req.Header.Set("X-Forwarded-Host", originalHost)

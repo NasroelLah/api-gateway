@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -38,7 +39,17 @@ type DNSResolver interface {
 type DefaultDNSResolver struct{}
 
 func (d *DefaultDNSResolver) LookupIP(host string) ([]net.IP, error) {
-	return net.LookupIP(host)
+	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, len(addresses))
+	for i, address := range addresses {
+		ips[i] = address.IP
+	}
+	return ips, nil
 }
 
 // dnsCacheEntry stores cached DNS results
@@ -57,13 +68,20 @@ type dnsCacheEntry struct {
 //   - Exact domains: "example.com" (matches only example.com)
 type IPWhitelist struct {
 	mu          sync.RWMutex
-	ipEntries   []*net.IPNet     // IP/CIDR entries for fast lookup
-	hostEntries []WhitelistEntry // Hostname and domain entries
-	allEntries  []WhitelistEntry // All entries with metadata
-	dnsResolver DNSResolver      // DNS resolver for hostname lookups
-	dnsCacheTTL time.Duration    // DNS cache TTL
+	ipEntries   []*net.IPNet
+	hostEntries []WhitelistEntry
+	allEntries  []WhitelistEntry
+	dnsResolver DNSResolver
+	dnsCacheTTL time.Duration
 	dnsCache    map[string]*dnsCacheEntry
 	cacheMu     sync.RWMutex
+	closed      bool
+	refreshing  bool
+	refreshEpoch uint64
+	refreshCh   chan struct{}
+	stopCh      chan struct{}
+	closeOnce   sync.Once
+	workerDone   chan struct{}
 }
 
 // WhitelistOption configures the whitelist
@@ -76,7 +94,8 @@ func WithDNSResolver(resolver DNSResolver) WhitelistOption {
 	}
 }
 
-// WithDNSCacheTTL sets the DNS cache TTL (0 disables caching)
+// WithDNSCacheTTL sets how long hostname results may authorize requests.
+// A non-positive value disables hostname IP authorization (fail closed).
 func WithDNSCacheTTL(ttl time.Duration) WhitelistOption {
 	return func(w *IPWhitelist) {
 		w.dnsCacheTTL = ttl
@@ -97,8 +116,11 @@ func NewIPWhitelist(entries []string, opts ...WhitelistOption) (*IPWhitelist, er
 		hostEntries: make([]WhitelistEntry, 0),
 		allEntries:  make([]WhitelistEntry, 0, len(entries)),
 		dnsResolver: &DefaultDNSResolver{},
-		dnsCacheTTL: 5 * time.Minute, // Default 5 min cache
+		dnsCacheTTL: 5 * time.Minute,
 		dnsCache:    make(map[string]*dnsCacheEntry),
+		refreshCh:   make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
+		workerDone:  make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -110,7 +132,7 @@ func NewIPWhitelist(entries []string, opts ...WhitelistOption) (*IPWhitelist, er
 			return nil, fmt.Errorf("invalid whitelist entry %q: %w", entry, err)
 		}
 	}
-
+	w.startRefreshLocked()
 	return w, nil
 }
 
@@ -254,20 +276,26 @@ func (w *IPWhitelist) IsAllowed(ip net.IP) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	// Check IP/CIDR entries first (fast path)
 	for _, entry := range w.ipEntries {
 		if entry.Contains(ip) {
 			return true
 		}
 	}
 
-	// Check hostname entries (requires reverse DNS or cached lookups)
 	for _, entry := range w.hostEntries {
-		if w.matchesHostEntry(ip, entry) {
-			return true
+		if entry.Type != EntryTypeHostname {
+			continue
+		}
+		ips, ok := w.cachedHostname(entry.Hostname)
+		if !ok {
+			continue
+		}
+		for _, resolvedIP := range ips {
+			if resolvedIP.Equal(ip) {
+				return true
+			}
 		}
 	}
-
 	return false
 }
 
@@ -279,7 +307,6 @@ func (w *IPWhitelist) IsHostnameAllowed(hostname string) bool {
 	}
 
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	// Remove port if present
 	if h, _, err := net.SplitHostPort(hostname); err == nil {
 		hostname = h
 	}
@@ -293,43 +320,20 @@ func (w *IPWhitelist) IsHostnameAllowed(hostname string) bool {
 		}
 	}
 
-	// Also check if hostname resolves to an allowed IP
-	ips, err := w.resolveHostname(hostname)
-	if err == nil {
-		for _, ip := range ips {
-			for _, ipEntry := range w.ipEntries {
-				if ipEntry.Contains(ip) {
-					return true
-				}
-			}
-		}
+	ips, ok := w.cachedHostname(hostname)
+	if !ok {
+		return false
 	}
-
-	return false
-}
-
-// matchesHostEntry checks if an IP matches a hostname/domain entry
-func (w *IPWhitelist) matchesHostEntry(ip net.IP, entry WhitelistEntry) bool {
-	switch entry.Type {
-	case EntryTypeHostname:
-		// Resolve hostname and check if IP matches
-		ips, err := w.resolveHostname(entry.Hostname)
-		if err != nil {
-			return false
-		}
-		for _, resolvedIP := range ips {
-			if resolvedIP.Equal(ip) {
+	for _, ip := range ips {
+		for _, ipEntry := range w.ipEntries {
+			if ipEntry.Contains(ip) {
 				return true
 			}
 		}
-	case EntryTypeDomain:
-		// For domain entries, we can't match by IP directly
-		// This would require reverse DNS which is unreliable
-		// Domain entries are primarily for hostname-based checks
-		return false
 	}
 	return false
 }
+
 
 // matchesHostname checks if a hostname matches a hostname/domain entry
 func (w *IPWhitelist) matchesHostname(hostname string, entry WhitelistEntry) bool {
@@ -348,39 +352,153 @@ func (w *IPWhitelist) matchesHostname(hostname string, entry WhitelistEntry) boo
 	return false
 }
 
-// resolveHostname resolves a hostname to IPs with caching
-func (w *IPWhitelist) resolveHostname(hostname string) ([]net.IP, error) {
-	if w.dnsCacheTTL > 0 {
-		w.cacheMu.RLock()
-		if cached, ok := w.dnsCache[hostname]; ok && time.Now().Before(cached.ExpiresAt) {
-			w.cacheMu.RUnlock()
-			return cached.IPs, nil
+func (w *IPWhitelist) cachedHostname(hostname string) ([]net.IP, bool) {
+	w.cacheMu.RLock()
+	defer w.cacheMu.RUnlock()
+	entry, ok := w.dnsCache[hostname]
+	if !ok || !time.Now().Before(entry.ExpiresAt) {
+		return nil, false
+	}
+	return entry.IPs, true
+}
+
+const dnsLookupTimeout = 5 * time.Second
+
+func (w *IPWhitelist) refreshDNS() {
+	w.mu.RLock()
+	epoch := w.refreshEpoch
+	hosts := make([]string, 0, len(w.hostEntries))
+	for _, entry := range w.hostEntries {
+		if entry.Type == EntryTypeHostname {
+			hosts = append(hosts, entry.Hostname)
 		}
-		w.cacheMu.RUnlock()
 	}
+	w.mu.RUnlock()
 
-	ips, err := w.dnsResolver.LookupIP(hostname)
-	if err != nil {
-		return nil, err
-	}
+	for _, hostname := range hosts {
+		result := make(chan struct {
+			ips []net.IP
+			err error
+		}, 1)
+		go func(host string) {
+			ips, err := w.dnsResolver.LookupIP(host)
+			result <- struct {
+				ips []net.IP
+				err error
+			}{ips, err}
+		}(hostname)
 
-	if w.dnsCacheTTL > 0 {
-		w.cacheMu.Lock()
-		w.dnsCache[hostname] = &dnsCacheEntry{
-			IPs:       ips,
-			ExpiresAt: time.Now().Add(w.dnsCacheTTL),
+		var ips []net.IP
+		select {
+		case resolved := <-result:
+			if resolved.err == nil {
+				ips = resolved.ips
+			}
+		case <-time.After(dnsLookupTimeout):
+			continue
+		case <-w.stopCh:
+			return
 		}
-		w.cacheMu.Unlock()
-	}
 
-	return ips, nil
+		w.mu.RLock()
+		stillPresent := epoch == w.refreshEpoch
+		if stillPresent {
+			stillPresent = false
+			for _, entry := range w.hostEntries {
+				if entry.Type == EntryTypeHostname && entry.Hostname == hostname {
+					stillPresent = true
+					break
+				}
+			}
+		}
+		if stillPresent {
+			w.cacheMu.Lock()
+			if len(ips) == 0 || w.dnsCacheTTL <= 0 {
+				delete(w.dnsCache, hostname)
+			} else {
+				w.dnsCache[hostname] = &dnsCacheEntry{
+					IPs:       ips,
+					ExpiresAt: time.Now().Add(w.dnsCacheTTL),
+				}
+			}
+			w.cacheMu.Unlock()
+		}
+		w.mu.RUnlock()
+	}
+}
+
+func hasHostnameEntry(entries []WhitelistEntry) bool {
+	for _, entry := range entries {
+		if entry.Type == EntryTypeHostname {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *IPWhitelist) startRefreshLocked() {
+	if w.closed || w.refreshing || !hasHostnameEntry(w.hostEntries) {
+		return
+	}
+	w.refreshing = true
+	go func() {
+		defer close(w.workerDone)
+		interval := w.dnsCacheTTL / 2
+		if w.dnsCacheTTL <= 0 {
+			interval = 5 * time.Minute
+		} else if interval <= 0 {
+			interval = time.Nanosecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			w.refreshDNS()
+			select {
+			case <-w.stopCh:
+				return
+			case <-w.refreshCh:
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (w *IPWhitelist) requestRefreshLocked() {
+	w.startRefreshLocked()
+	if !w.closed && w.refreshing {
+		select {
+		case w.refreshCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Close stops background DNS refresh. It is safe to call more than once.
+func (w *IPWhitelist) Close() {
+	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		w.closed = true
+		refreshing := w.refreshing
+		close(w.stopCh)
+		w.mu.Unlock()
+		if refreshing {
+			<-w.workerDone
+		}
+	})
 }
 
 // Add menambahkan entry baru ke whitelist
 func (w *IPWhitelist) Add(entry string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.addEntry(entry)
+	if w.closed {
+		return errors.New("whitelist is closed")
+	}
+	if err := w.addEntry(entry); err != nil {
+		return err
+	}
+	w.requestRefreshLocked()
+	return nil
 }
 
 // Reload me-reload whitelist dari konfigurasi baru
@@ -389,14 +507,11 @@ func (w *IPWhitelist) Reload(entries []string) error {
 	newIPEntries := make([]*net.IPNet, 0)
 	newHostEntries := make([]WhitelistEntry, 0)
 	newAllEntries := make([]WhitelistEntry, 0, len(entries))
-
-	// Create temporary whitelist to parse entries
 	temp := &IPWhitelist{
 		ipEntries:   newIPEntries,
 		hostEntries: newHostEntries,
 		allEntries:  newAllEntries,
 	}
-
 	for _, entry := range entries {
 		if err := temp.addEntry(entry); err != nil {
 			return fmt.Errorf("invalid whitelist entry %q: %w", entry, err)
@@ -405,24 +520,30 @@ func (w *IPWhitelist) Reload(entries []string) error {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
+	if w.closed {
+		return errors.New("whitelist is closed")
+	}
+	w.refreshEpoch++
 	w.ipEntries = temp.ipEntries
 	w.hostEntries = temp.hostEntries
 	w.allEntries = temp.allEntries
-
-	// Clear DNS cache on reload
 	w.cacheMu.Lock()
 	w.dnsCache = make(map[string]*dnsCacheEntry)
 	w.cacheMu.Unlock()
-
+	w.requestRefreshLocked()
 	return nil
 }
 
+
 // ClearDNSCache clears the DNS cache
 func (w *IPWhitelist) ClearDNSCache() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.refreshEpoch++
 	w.cacheMu.Lock()
-	defer w.cacheMu.Unlock()
 	w.dnsCache = make(map[string]*dnsCacheEntry)
+	w.cacheMu.Unlock()
+	w.requestRefreshLocked()
 }
 
 

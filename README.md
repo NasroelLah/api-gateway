@@ -1,12 +1,12 @@
 # API Gateway
 
-Production-ready API Gateway built with Go, featuring advanced routing, security, observability, and high performance.
+API Gateway built with Go, providing routing, security, and observability.
 
 ## Features
 
 - **Reverse Proxy**: Static and dynamic upstream routing with longest prefix matching
 - **Security**: IP whitelisting, API key authentication, request sanitization
-- **Rate Limiting**: In-memory and Redis-based rate limiting
+- **Rate Limiting**: Per-client in-memory rate limiting
 - **Observability**: Structured logging, Prometheus metrics, OpenTelemetry tracing
 - **TLS/mTLS**: TLS termination with mutual TLS support
 - **High Performance**: Connection pooling, graceful shutdown, configurable timeouts
@@ -15,8 +15,7 @@ Production-ready API Gateway built with Go, featuring advanced routing, security
 
 ### Prerequisites
 
-- Go 1.25.6 or higher
-- (Optional) Redis for distributed rate limiting
+- Go 1.27.4 or higher
 - (Optional) OpenTelemetry Collector for tracing
 
 ### Installation
@@ -38,7 +37,7 @@ cp config.example.yaml config.yaml
 ### Running the Gateway
 
 ```bash
-# Option 1: Run with embedded config (no config file needed)
+# Option 1: Run with built-in defaults (no config file needed)
 go run ./cmd/gateway
 
 # Option 2: Run with external config file
@@ -47,7 +46,7 @@ go run ./cmd/gateway -config config.yaml
 # Option 3: Quick start with CLI flags
 go run ./cmd/gateway -port 8080 -api-key my-secret-key
 
-# Option 4: Build and run with embedded config
+# Option 4: Build and run with built-in defaults
 go build -o gateway ./cmd/gateway
 ./gateway
 
@@ -74,35 +73,34 @@ The gateway will start on `http://0.0.0.0:7070` by default.
 
 ## Configuration
 
-Configuration can be provided via:
-1. **Embedded config** (compiled into binary) - lowest priority
-2. **YAML file** via `-config` flag - medium priority  
-3. **Environment variables** - highest priority
+Configuration can be provided via built-in defaults, a YAML file selected with
+`-config`, environment variables, and CLI flags.
 
 Environment variables use the format: `<KEY>_<SUBKEY>` (e.g., `SERVER_PORT=7070`)
 
 ### Configuration Priority
 
 ```
-Environment Variables > External Config File > Embedded Config > Defaults
+CLI Flags > Environment Variables > External Config File > Built-in Defaults
 ```
 
-### Using Embedded Configuration
+### Using Built-in Defaults
 
-The gateway includes a default configuration embedded at compile time. You can run it without any external config file:
+The gateway can run without an external config file:
 
 ```bash
-# Run with embedded config (no -config flag needed)
+# Run with built-in defaults (no -config flag needed)
 ./gateway
 
 # Or with Docker
 docker run -p 7070:7070 api-gateway:latest
 ```
 
-The embedded config provides sensible defaults for development and can be overridden with environment variables:
+Built-in defaults can be overridden with environment variables. Dynamic upstream routing
+is disabled until explicitly configured; the default configuration has no upstreams.
 
 ```bash
-# Override embedded config with environment variables
+# Override defaults with environment variables
 export SERVER_PORT=8080
 export LOGGING_LEVEL=debug
 export WHITELIST_ENABLED=false
@@ -111,7 +109,7 @@ export WHITELIST_ENABLED=false
 
 ### Using External Configuration
 
-Override the embedded config with an external YAML file:
+Override defaults with an external YAML file:
 
 ```bash
 # Copy example config
@@ -136,8 +134,10 @@ server:
   host: "0.0.0.0"
   port: 7070
   read_timeout: 30s
-  write_timeout: 30s
+  write_timeout: 90s
   idle_timeout: 120s
+  # Only trust forwarding headers from these proxies; empty by default.
+  trusted_proxies: []
 
 proxy:
   max_idle_conns: 1000
@@ -170,7 +170,7 @@ whitelist:
 
 rate_limit:
   enabled: true
-  type: "memory"  # or "redis"
+  type: "memory"  # redis is not integrated and startup rejects it
   requests_per_second: 100
   burst: 200
 
@@ -196,11 +196,32 @@ tracing:
 Override any config value using environment variables:
 
 ```bash
-export GATEWAY_SERVER_PORT=7070
-export GATEWAY_LOGGING_LEVEL=debug
-export GATEWAY_WHITELIST_ENABLED=false
-export GATEWAY_RATE_LIMIT_REQUESTS_PER_SECOND=200
+export SERVER_PORT=7070
+export LOGGING_LEVEL=debug
+export WHITELIST_ENABLED=false
+export RATE_LIMIT_REQUESTS_PER_SECOND=200
 ```
+
+Dynamic upstreams are disabled by default. If enabled, configure a restrictive
+`allowed_hosts` list and network egress policy; `*` allows requests to arbitrary
+HTTP(S) hosts. Behind a trusted ingress, configure its IPs/CIDRs in
+`server.trusted_proxies`; never trust proxy headers from arbitrary clients.
+
+In-memory rate limits are per gateway process, not shared between replicas.
+Selecting `rate_limit.type: redis` currently fails startup rather than silently
+using a local limit.
+
+Use OTLP for new tracing deployments. The Zipkin exporter remains available for
+compatibility but is deprecated upstream; migrate to Zipkin's OTLP ingestion or
+an OpenTelemetry Collector before its removal.
+
+The current OTLP gRPC exporter uses an insecure connection. Protect the
+collector network or provide transport encryption outside the gateway.
+
+Hostname-based IP whitelist entries are resolved asynchronously. They deny
+access until a DNS result is available and after it expires; IP/CIDR entries
+do not depend on DNS. Metrics `path` labels now use route patterns rather than
+raw URLs; update dashboards that previously selected literal request paths.
 
 ## Usage Examples
 

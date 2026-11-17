@@ -33,12 +33,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: go.mod
           cache: true
@@ -71,7 +71,7 @@ jobs:
             ./cmd/gateway
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
           path: dist/
@@ -84,12 +84,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           path: dist
           pattern: binary-*
@@ -100,34 +100,26 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
-      - name: Generate changelog
+      - name: Generate release notes
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v header="## [${VERSION}]" '
+            index($0, "## [") == 1 { if (found) exit; if (index($0, header) == 1) found = 1 }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          cat >> RELEASE_NOTES.md <<'EOF'
 
-          if [ -n "$PREV_TAG" ]; then
-            echo "## Changes since ${PREV_TAG}" > CHANGELOG.md
-            echo "" >> CHANGELOG.md
-            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
-          else
-            echo "## Initial Release" > CHANGELOG.md
-          fi
+          ## Binaries
 
-          echo "" >> CHANGELOG.md
-          echo "## Binaries" >> CHANGELOG.md
-          echo "" >> CHANGELOG.md
-          echo "Supported platforms:" >> CHANGELOG.md
-          echo "- linux/amd64" >> CHANGELOG.md
-          echo "- linux/arm64" >> CHANGELOG.md
-          echo "- linux/arm/v7" >> CHANGELOG.md
-          echo "- darwin/amd64" >> CHANGELOG.md
-          echo "- darwin/arm64" >> CHANGELOG.md
-          echo "- windows/amd64" >> CHANGELOG.md
-          echo "- windows/arm64" >> CHANGELOG.md
+          Supported platforms: linux/amd64, linux/arm64, linux/arm/v7,
+          darwin/amd64, darwin/arm64, windows/amd64, windows/arm64.
+          EOF
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.4
         with:
-          body_path: CHANGELOG.md
+          body_path: RELEASE_NOTES.md
           files: |
             dist/*
           draft: false

@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/nasroellah/api-gateway/internal/observability"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -20,9 +21,7 @@ func TracingMiddleware(tracer trace.Tracer) func(http.Handler) http.Handler {
 			// Requirements: 6.2
 			ctx := observability.ExtractTraceContext(r.Context(), r)
 
-			// Create span name from HTTP method and path
-			spanName := r.Method + " " + r.URL.Path
-
+			spanName := methodLabel(r.Method)
 			// Start a new span or continue from extracted context
 			ctx, span := tracer.Start(ctx, spanName,
 				trace.WithSpanKind(trace.SpanKindServer),
@@ -34,8 +33,6 @@ func TracingMiddleware(tracer trace.Tracer) func(http.Handler) http.Handler {
 			clientIP := getClientIPForTracing(r)
 			span.SetAttributes(
 				semconv.HTTPRequestMethodKey.String(r.Method),
-				semconv.URLFull(r.URL.String()),
-				semconv.URLPath(r.URL.Path),
 				semconv.URLScheme(r.URL.Scheme),
 				semconv.ClientAddress(clientIP),
 				semconv.UserAgentOriginal(r.UserAgent()),
@@ -47,7 +44,7 @@ func TracingMiddleware(tracer trace.Tracer) func(http.Handler) http.Handler {
 			}
 
 			// Wrap response writer to capture status code
-			wrapped := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+			wrapped := newResponseWriter(w, r.ProtoMajor)
 
 			// Update request with new context containing span
 			r = r.WithContext(ctx)
@@ -55,14 +52,15 @@ func TracingMiddleware(tracer trace.Tracer) func(http.Handler) http.Handler {
 			// Call next handler
 			next.ServeHTTP(wrapped, r)
 
-			// Add response attributes after handler completes
-			span.SetAttributes(
-				semconv.HTTPResponseStatusCode(wrapped.statusCode),
-			)
-
-			// Set span status based on HTTP status code
-			if wrapped.statusCode >= 400 {
-				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
+			if routeContext := chi.RouteContext(r.Context()); routeContext != nil {
+				if pattern := routeContext.RoutePattern(); pattern != "" {
+					span.SetName(methodLabel(r.Method) + " " + pattern)
+				}
+			}
+			statusCode := responseStatus(wrapped)
+			span.SetAttributes(semconv.HTTPResponseStatusCode(statusCode))
+			if statusCode >= 400 {
+				span.SetStatus(codes.Error, http.StatusText(statusCode))
 			} else {
 				span.SetStatus(codes.Ok, "")
 			}
@@ -70,40 +68,13 @@ func TracingMiddleware(tracer trace.Tracer) func(http.Handler) http.Handler {
 	}
 }
 
-// statusResponseWriter wraps http.ResponseWriter to capture status code
-type statusResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-	written    bool
-}
-
-func (w *statusResponseWriter) WriteHeader(code int) {
-	if !w.written {
-		w.statusCode = code
-		w.written = true
-	}
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *statusResponseWriter) Write(b []byte) (int, error) {
-	if !w.written {
-		w.written = true
-	}
-	return w.ResponseWriter.Write(b)
-}
 
 // getClientIPForTracing extracts the client IP from the request for tracing
 func getClientIPForTracing(r *http.Request) string {
-	// Check X-Forwarded-For header first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
+	if ip := GetSanitizedClientIP(r); ip != "" {
+		return ip
 	}
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	// Fall back to RemoteAddr (use extractClientIP from sanitizer.go)
-	return extractClientIP(r.RemoteAddr)
+	return "unknown"
 }
 
 // InjectTracingHeaders injects trace context into outgoing request headers

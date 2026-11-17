@@ -51,6 +51,3 @@ Thumbs.db
 /tmp/
 *.tmp
 config.yaml
-
-#Test file
-*_test.go

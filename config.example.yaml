@@ -16,8 +16,11 @@ server:
   read_timeout: 30s
   
   # Maximum duration before timing out writes of the response
-  write_timeout: 30s
+  write_timeout: 90s
   
+  # Forwarding headers are accepted only from these explicitly trusted peers.
+  # Empty means client IPs always come from the direct connection peer.
+  trusted_proxies: []
   # Maximum amount of time to wait for the next request (keep-alive)
   idle_timeout: 120s
 
@@ -37,27 +40,23 @@ proxy:
   # Dynamic upstream routing configuration
   dynamic_upstream:
     # Enable dynamic upstream via header
-    enabled: true
+    enabled: false
     
     # Header name containing target upstream URL
     header_name: "X-Upstream-Target"
     
-    # Allowed hosts for dynamic routing (supports wildcards)
-    # Use "*" to allow all hosts (not recommended for production)
+    # Allowed hosts for dynamic routing (explicit hosts only; no wildcard)
     allowed_hosts:
-      - "*"
-      # - "*.internal.example.com"
-      # - "api.trusted-partner.com"
-      # - "*.svc.cluster.local"
+      - "api.trusted-partner.com"
   
   # Static upstream routing rules (longest prefix match)
   upstreams:
     - path_prefix: "/api/v1/users"
       target: "http://user-service:7070"
-    
+
     - path_prefix: "/api/v1/orders"
       target: "http://order-service:7070"
-    
+
     - path_prefix: "/api/v1/products"
       target: "http://product-service:7070"
 
@@ -92,7 +91,7 @@ rate_limit:
   # Enable rate limiting
   enabled: true
   
-  # Rate limiter type: "memory" or "redis"
+  # In-memory only. Redis is not integrated and is rejected at startup.
   type: "memory"
   
   # Requests per second per client
@@ -101,13 +100,6 @@ rate_limit:
   # Burst size (max requests allowed in a burst)
   burst: 200
   
-  # Redis configuration (only used when type: "redis")
-  redis:
-    address: "redis:6379"
-    password: ""
-    db: 0
-    # Sliding window duration
-    window: 1s
 
 # =============================================================================
 # Logging Configuration

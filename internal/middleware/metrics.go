@@ -4,8 +4,27 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/nasroellah/api-gateway/internal/observability"
 )
+
+func routeLabel(r *http.Request) string {
+	if routeContext := chi.RouteContext(r.Context()); routeContext != nil {
+		if pattern := routeContext.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	return "unmatched"
+}
+
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+		return method
+	default:
+		return "other"
+	}
+}
 
 // MetricsMiddleware creates a middleware that records request metrics
 // Records request count and latency for each request
@@ -15,15 +34,9 @@ func MetricsMiddleware(metrics *observability.Metrics) func(http.Handler) http.H
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 
-			// Wrap response writer to capture status code
-			wrapped := newResponseWriter(w)
-
-			// Process request
+			wrapped := newResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(wrapped, r)
-
-			// Record metrics
-			duration := time.Since(start)
-			metrics.RecordRequest(r.Method, r.URL.Path, wrapped.StatusCode(), duration)
+			metrics.RecordRequest(methodLabel(r.Method), routeLabel(r), responseStatus(wrapped), time.Since(start))
 		})
 	}
 }
@@ -36,29 +49,17 @@ func MetricsMiddlewareWithUpstreamErrors(metrics *observability.Metrics) func(ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 
-			// Wrap response writer to capture status code
-			wrapped := newResponseWriter(w)
-
-			// Process request
+			wrapped := newResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(wrapped, r)
-
-			// Record metrics
-			duration := time.Since(start)
-			statusCode := wrapped.StatusCode()
-			metrics.RecordRequest(r.Method, r.URL.Path, statusCode, duration)
-
-			// Record upstream errors based on status code
+			statusCode := responseStatus(wrapped)
+			metrics.RecordRequest(methodLabel(r.Method), routeLabel(r), statusCode, time.Since(start))
 			if statusCode == http.StatusBadGateway || statusCode == http.StatusGatewayTimeout {
-				upstreamHost := r.Header.Get("X-Upstream-Target")
-				if upstreamHost == "" {
-					upstreamHost = "unknown"
-				}
-				errorType := getErrorType(statusCode)
-				metrics.RecordUpstreamError(upstreamHost, errorType)
+				metrics.RecordUpstreamError("unknown", getErrorType(statusCode))
 			}
 		})
 	}
 }
+
 
 // getErrorType returns the error type based on status code
 func getErrorType(statusCode int) string {

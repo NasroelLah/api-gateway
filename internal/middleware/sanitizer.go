@@ -1,116 +1,100 @@
 package middleware
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
 )
 
-// HeaderSanitizer sanitizes X-Forwarded-For and X-Real-IP headers
-// with the correct client IP from the request's RemoteAddr.
-// This prevents header spoofing attacks.
-// Requirements: 1.4
+type sanitizedClientIPKey struct{}
+
+// HeaderSanitizer replaces client-supplied forwarding headers with the peer IP.
 func HeaderSanitizer(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract the real client IP from RemoteAddr
-		clientIP := extractClientIP(r.RemoteAddr)
-
-		// Sanitize X-Forwarded-For - replace with actual client IP
-		// This prevents clients from spoofing their IP via this header
-		r.Header.Set("X-Forwarded-For", clientIP)
-
-		// Sanitize X-Real-IP - replace with actual client IP
-		r.Header.Set("X-Real-IP", clientIP)
-
-		next.ServeHTTP(w, r)
-	})
+	return HeaderSanitizerWithTrust(nil)(next)
 }
 
-// HeaderSanitizerWithTrust creates a sanitizer that optionally trusts
-// existing proxy headers from trusted proxies.
-// If the request comes from a trusted proxy, it appends the client IP
-// to the existing X-Forwarded-For chain instead of replacing it.
+// HeaderSanitizerWithTrust accepts forwarding headers only from configured
+// trusted peers and walks X-Forwarded-For from the nearest hop outward.
 func HeaderSanitizerWithTrust(trustedProxies []string) func(http.Handler) http.Handler {
-	// Parse trusted proxy CIDRs
 	trustedNets := make([]*net.IPNet, 0, len(trustedProxies))
 	for _, proxy := range trustedProxies {
-		_, ipNet, err := net.ParseCIDR(proxy)
-		if err != nil {
-			// Try as single IP
-			ip := net.ParseIP(proxy)
-			if ip != nil {
-				var mask net.IPMask
-				if ip.To4() != nil {
-					mask = net.CIDRMask(32, 32)
-				} else {
-					mask = net.CIDRMask(128, 128)
-				}
-				trustedNets = append(trustedNets, &net.IPNet{IP: ip, Mask: mask})
+		if ip := net.ParseIP(proxy); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
 			}
+			trustedNets = append(trustedNets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 			continue
 		}
-		trustedNets = append(trustedNets, ipNet)
+		_, ipNet, err := net.ParseCIDR(proxy)
+		if err == nil {
+			trustedNets = append(trustedNets, ipNet)
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			clientIP := extractClientIP(r.RemoteAddr)
-			clientNetIP := net.ParseIP(clientIP)
-
-			// Check if request is from a trusted proxy
-			isTrusted := false
-			if clientNetIP != nil {
-				for _, trusted := range trustedNets {
-					if trusted.Contains(clientNetIP) {
-						isTrusted = true
+			peer := net.ParseIP(extractClientIP(r.RemoteAddr))
+			clientIP := ""
+			if isTrustedProxy(peer, trustedNets) {
+				chain := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+				for i := len(chain) - 1; i >= 0; i-- {
+					hop := net.ParseIP(strings.TrimSpace(chain[i]))
+					if hop == nil {
+						break
+					}
+					clientIP = hop.String()
+					if !isTrustedProxy(hop, trustedNets) {
 						break
 					}
 				}
-			}
-
-			if isTrusted {
-				// Append client IP to existing X-Forwarded-For chain
-				existingXFF := r.Header.Get("X-Forwarded-For")
-				if existingXFF != "" {
-					r.Header.Set("X-Forwarded-For", existingXFF+", "+clientIP)
-				} else {
-					r.Header.Set("X-Forwarded-For", clientIP)
+				if clientIP == "" {
+					if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
+						clientIP = ip.String()
+					}
 				}
-			} else {
-				// Not from trusted proxy - replace headers entirely
-				r.Header.Set("X-Forwarded-For", clientIP)
-				r.Header.Set("X-Real-IP", clientIP)
 			}
-
+			if clientIP == "" && peer != nil {
+				clientIP = peer.String()
+			}
+			r.Header.Set("X-Forwarded-For", clientIP)
+			r.Header.Set("X-Real-IP", clientIP)
+			r = r.WithContext(context.WithValue(r.Context(), sanitizedClientIPKey{}, clientIP))
 			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-// extractClientIP extracts the IP address from a RemoteAddr string
-// RemoteAddr is typically in the format "IP:port" or just "IP"
+func isTrustedProxy(ip net.IP, trustedNets []*net.IPNet) bool {
+	for _, trusted := range trustedNets {
+		if trusted.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractClientIP extracts the IP address from a RemoteAddr string.
 func extractClientIP(remoteAddr string) string {
 	if remoteAddr == "" {
 		return ""
 	}
-
-	// Try to split host:port
 	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		// No port, return as-is (might be just IP)
-		return strings.TrimSpace(remoteAddr)
+	if err == nil {
+		return host
 	}
-
-	return host
+	return strings.TrimSpace(remoteAddr)
 }
 
-// GetSanitizedClientIP returns the sanitized client IP from the request
-// This should be called after HeaderSanitizer middleware has run
+// GetSanitizedClientIP returns the identity established by the sanitizer.
 func GetSanitizedClientIP(r *http.Request) string {
-	// After sanitization, X-Real-IP contains the correct client IP
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+	if ip, ok := r.Context().Value(sanitizedClientIPKey{}).(string); ok {
 		return ip
 	}
-	// Fallback to extracting from RemoteAddr
-	return extractClientIP(r.RemoteAddr)
+	if ip := net.ParseIP(extractClientIP(r.RemoteAddr)); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
+

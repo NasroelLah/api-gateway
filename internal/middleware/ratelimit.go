@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"fmt"
+	"hash/maphash"
 	"net/http"
 	"sync"
 	"time"
@@ -23,43 +24,37 @@ type clientLimiter struct {
 	lastSeen time.Time
 }
 
-// InMemoryRateLimiter implements rate limiting using golang.org/x/time/rate
-type InMemoryRateLimiter struct {
+type limiterShard struct {
 	mu       sync.RWMutex
 	limiters map[string]*clientLimiter
+}
+
+// InMemoryRateLimiter implements rate limiting using golang.org/x/time/rate.
+type InMemoryRateLimiter struct {
+	shards   [32]limiterShard
+	seed     maphash.Seed
 	rate     rate.Limit
 	burst    int
-	ttl      time.Duration // time after which inactive limiters are cleaned up
+	ttl      time.Duration
 	stopCh   chan struct{}
-	stopped  bool
+	stopOnce sync.Once
 }
 
 // NewInMemoryRateLimiter creates a new in-memory rate limiter
 // rps: requests per second allowed
 // burst: maximum burst size (token bucket capacity)
 func NewInMemoryRateLimiter(rps float64, burst int) *InMemoryRateLimiter {
-	rl := &InMemoryRateLimiter{
-		limiters: make(map[string]*clientLimiter),
-		rate:     rate.Limit(rps),
-		burst:    burst,
-		ttl:      time.Minute * 5, // cleanup limiters not seen for 5 minutes
-		stopCh:   make(chan struct{}),
-	}
-
-	// Start cleanup goroutine
-	go rl.cleanup()
-
-	return rl
+	return NewInMemoryRateLimiterWithTTL(rps, burst, 5*time.Minute)
 }
 
 // NewInMemoryRateLimiterWithTTL creates a rate limiter with custom TTL for cleanup
 func NewInMemoryRateLimiterWithTTL(rps float64, burst int, ttl time.Duration) *InMemoryRateLimiter {
 	rl := &InMemoryRateLimiter{
-		limiters: make(map[string]*clientLimiter),
-		rate:     rate.Limit(rps),
-		burst:    burst,
-		ttl:      ttl,
-		stopCh:   make(chan struct{}),
+		seed:   maphash.MakeSeed(),
+		rate:   rate.Limit(rps),
+		burst:  burst,
+		ttl:    ttl,
+		stopCh: make(chan struct{}),
 	}
 
 	// Start cleanup goroutine
@@ -72,20 +67,23 @@ func NewInMemoryRateLimiterWithTTL(rps float64, burst int, ttl time.Duration) *I
 // Allow checks if a request from the given key is allowed
 // Returns (true, 0) if allowed, (false, retryAfter) if rate limited
 func (rl *InMemoryRateLimiter) Allow(key string) (bool, time.Duration) {
-	rl.mu.Lock()
-	cl, exists := rl.limiters[key]
+	shard := &rl.shards[maphash.String(rl.seed, key)%uint64(len(rl.shards))]
+	shard.mu.Lock()
+	cl, exists := shard.limiters[key]
 	if !exists {
-		cl = &clientLimiter{
-			limiter:  rate.NewLimiter(rl.rate, rl.burst),
-			lastSeen: time.Now(),
+		if shard.limiters == nil {
+			shard.limiters = make(map[string]*clientLimiter)
 		}
-		rl.limiters[key] = cl
-	} else {
-		cl.lastSeen = time.Now()
+		cl = &clientLimiter{limiter: rate.NewLimiter(rl.rate, rl.burst)}
+		shard.limiters[key] = cl
 	}
-	rl.mu.Unlock()
+	cl.lastSeen = time.Now()
+	shard.mu.Unlock()
 
-	// Try to get a token
+	// The common allowed path does not need to allocate a reservation.
+	if cl.limiter.Allow() {
+		return true, 0
+	}
 	reservation := cl.limiter.Reserve()
 	if !reservation.OK() {
 		// This shouldn't happen with our configuration, but handle it
@@ -119,32 +117,34 @@ func (rl *InMemoryRateLimiter) cleanup() {
 
 // cleanupExpired removes limiters that haven't been seen within TTL
 func (rl *InMemoryRateLimiter) cleanupExpired() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
 	now := time.Now()
-	for key, cl := range rl.limiters {
-		if now.Sub(cl.lastSeen) > rl.ttl {
-			delete(rl.limiters, key)
+	for i := range rl.shards {
+		shard := &rl.shards[i]
+		shard.mu.Lock()
+		for key, cl := range shard.limiters {
+			if now.Sub(cl.lastSeen) > rl.ttl {
+				delete(shard.limiters, key)
+			}
 		}
+		shard.mu.Unlock()
 	}
 }
 
 // Stop stops the cleanup goroutine
 func (rl *InMemoryRateLimiter) Stop() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if !rl.stopped {
-		rl.stopped = true
-		close(rl.stopCh)
-	}
+	rl.stopOnce.Do(func() { close(rl.stopCh) })
 }
 
 // Size returns the number of active limiters (useful for testing/metrics)
 func (rl *InMemoryRateLimiter) Size() int {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
-	return len(rl.limiters)
+	count := 0
+	for i := range rl.shards {
+		shard := &rl.shards[i]
+		shard.mu.RLock()
+		count += len(shard.limiters)
+		shard.mu.RUnlock()
+	}
+	return count
 }
 
 // RateLimitMiddleware creates HTTP middleware that applies rate limiting
@@ -177,14 +177,8 @@ func formatRetryAfter(d time.Duration) string {
 
 // GetClientIP extracts client IP from request for use as rate limit key
 func GetClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first (for proxied requests)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
+	if ip := GetSanitizedClientIP(r); ip != "" {
+		return ip
 	}
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	// Fall back to RemoteAddr
-	return r.RemoteAddr
+	return "unknown"
 }
