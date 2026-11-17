@@ -13,12 +13,70 @@ API Gateway built with Go, providing routing, security, and observability.
 
 ## Quick Start
 
-### Prerequisites
-
-- Go 1.27.4 or higher
-- (Optional) OpenTelemetry Collector for tracing
-
 ### Installation
+
+#### Download a release binary
+
+Prebuilt binaries do not require Go. Download the latest version from
+[GitHub Releases](https://github.com/NasroelLah/api-gateway/releases) or use
+the commands below. The version is pinned so the binary and checksum always
+come from the same release; change `v2.0.0` to another release tag if needed.
+
+**Linux and macOS**
+
+Set `ASSET` to the file for your system: `api-gateway-linux-amd64`,
+`api-gateway-linux-arm64`, `api-gateway-linux-armv7`,
+`api-gateway-darwin-amd64` (Intel Mac), or `api-gateway-darwin-arm64`
+(Apple Silicon). The example below uses Linux x86-64.
+
+```bash
+VERSION=v2.0.0
+ASSET=api-gateway-linux-amd64
+BASE="https://github.com/NasroelLah/api-gateway/releases/download/$VERSION"
+
+curl -fL "$BASE/$ASSET" -o "$ASSET" &&
+curl -fL "$BASE/checksums.txt" -o checksums.txt &&
+grep -F "  $ASSET" checksums.txt > checksum.txt &&
+sha256sum -c checksum.txt &&
+chmod +x "$ASSET" &&
+mv "$ASSET" gateway
+```
+
+On macOS, replace `sha256sum -c checksum.txt` with `shasum -a 256 -c checksum.txt`.
+Run `./gateway -help` to inspect the available flags.
+To make it available on your `PATH`, move `gateway` to a directory on your
+`PATH`, for example `/usr/local/bin`.
+
+**Windows PowerShell**
+
+Use `api-gateway-windows-amd64.exe` for x86-64 or
+`api-gateway-windows-arm64.exe` for ARM64.
+
+```powershell
+$Version = "v2.0.0"
+$Asset = "api-gateway-windows-amd64.exe"
+$Base = "https://github.com/NasroelLah/api-gateway/releases/download/$Version"
+
+Invoke-WebRequest "$Base/$Asset" -OutFile $Asset
+Invoke-WebRequest "$Base/checksums.txt" -OutFile checksums.txt
+$Line = Get-Content checksums.txt | Where-Object { $_.EndsWith("  $Asset") }
+if (-not $Line) { throw "Checksum not found for $Asset" }
+$Expected = ($Line -split '\s+')[0]
+if ((Get-FileHash $Asset -Algorithm SHA256).Hash -ne $Expected) {
+    throw "Checksum verification failed for $Asset"
+}
+Move-Item $Asset gateway.exe
+.\gateway.exe -help
+```
+
+The downloaded binary starts with no upstreams configured. To forward
+requests, download [`config.example.yaml`](https://raw.githubusercontent.com/NasroelLah/api-gateway/v2.0.0/config.example.yaml),
+edit its upstream targets and security settings, and start the binary with
+`./gateway -config config.yaml` (Windows: `.\gateway.exe -config config.yaml`).
+
+#### Build from source
+
+Requires Go 1.27.4 or higher. An OpenTelemetry Collector is optional for tracing.
 
 ```bash
 # Clone the repository
